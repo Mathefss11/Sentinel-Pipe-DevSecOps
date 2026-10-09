@@ -29,6 +29,11 @@ build/
 *.iml
 .vscode/
 
+# Downloaded CI log archives and local logs/temporary files
+logs_*.zip
+*.log
+tmp/
+
 # OS files
 .DS_Store
 Thumbs.db

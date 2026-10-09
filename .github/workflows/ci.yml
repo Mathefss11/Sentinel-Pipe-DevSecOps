@@ -35,6 +35,41 @@ jobs:
           cache: maven
           cache-dependency-path: services/sentinel-api/pom.xml
 
+      # Docker Hub rate-limits anonymous pulls per IP, and GitHub-hosted runners share
+      # IPs. Authenticate when credentials are configured, pre-pull with retries, then
+      # log out before any build or test code runs.
+      - name: Check for Docker Hub credentials
+        id: dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Docker Hub credentials not configured; pulling anonymously."
+          fi
+
+      - name: Log in to Docker Hub (read-only)
+        if: steps.dockerhub.outputs.configured == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Must match TestcontainersConfiguration.java and the Ryuk image used by Testcontainers.
+      - name: Pre-pull Testcontainers images
+        run: >-
+          sh "$GITHUB_WORKSPACE/scripts/ci/pull-images.sh"
+          postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+          rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
+          testcontainers/ryuk:0.14.0
+
+      - name: Log out of Docker Hub
+        if: always()
+        run: docker logout
+
       # Integration tests use Testcontainers against the runner's Docker Engine.
       - name: Build and test
         run: sh ./mvnw --batch-mode --no-transfer-progress clean verify
@@ -87,15 +122,45 @@ jobs:
       - name: Validate Docker Compose configuration
         run: docker compose --env-file .env.example config --quiet
 
+      # See the api job for why images are pulled up front.
+      - name: Check for Docker Hub credentials
+        id: dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Docker Hub credentials not configured; pulling anonymously."
+          fi
+
+      - name: Log in to Docker Hub (read-only)
+        if: steps.dockerhub.outputs.configured == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pre-pull Compose images
+        run: |
+          set -o pipefail
+          docker compose --env-file .env.example config --images | xargs sh scripts/ci/pull-images.sh
+
+      - name: Log out of Docker Hub
+        if: always()
+        run: docker logout
+
       - name: Test OPA server authorization policy
         run: |
-          docker run --rm -v "$PWD/infrastructure/docker/opa:/policies:ro" "$OPA_IMAGE" check --strict /policies
-          docker run --rm -v "$PWD/infrastructure/docker/opa:/policies:ro" "$OPA_IMAGE" test /policies -v
+          docker run --rm --pull never -v "$PWD/infrastructure/docker/opa:/policies:ro" "$OPA_IMAGE" check --strict /policies
+          docker run --rm --pull never -v "$PWD/infrastructure/docker/opa:/policies:ro" "$OPA_IMAGE" test /policies -v
 
       # Placeholder credentials from .env.example are acceptable only because this
       # stack is ephemeral, bound to loopback, and destroyed at the end of the job.
       - name: Start local stack and wait for health checks
-        run: docker compose --env-file .env.example up --detach --wait --wait-timeout 180
+        run: docker compose --env-file .env.example up --pull never --detach --wait --wait-timeout 180
 
       - name: Show service status
         if: always()

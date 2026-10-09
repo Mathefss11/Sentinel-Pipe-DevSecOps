@@ -187,6 +187,15 @@ The workflow uses a read-only `GITHUB_TOKEN` (`contents: read`). It does not per
 credentials and has no deployment or publishing steps. Third-party actions are pinned to full
 commit SHAs.
 
+Container images are pre-pulled with bounded retries (`scripts/ci/pull-images.sh`), because
+Docker Hub rate-limits anonymous pulls and GitHub-hosted runners share IP addresses.
+No credentials are required: by default, CI pulls images anonymously.
+
+Authenticated pulls are an optional opt-in that raises the rate limit. To enable them, create
+a Docker Hub personal access token with **Public Repo Read-only** scope. Add your Docker Hub
+username as the repository variable `DOCKERHUB_USERNAME` and the token as the repository secret
+`DOCKERHUB_TOKEN`. The workflow logs out of Docker Hub before any build or test code runs.
+
 ## Milestone 1 checklist
 
 - [x] Monorepo layout with `services/sentinel-api` and `services/sentinel-worker`
