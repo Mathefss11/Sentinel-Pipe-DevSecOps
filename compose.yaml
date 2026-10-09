@@ -1,0 +1,92 @@
+# SentinelPipe local development infrastructure.
+#
+# Development use only. All host port bindings are restricted to the loopback
+# interface (127.0.0.1). Images are pinned to immutable multi-arch index
+# digests; the tag is kept for readability. Credentials come from `.env`
+# (copy `.env.example`); Compose refuses to start if a password is missing.
+
+name: sentinelpipe
+
+services:
+  postgres:
+    image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    environment:
+      POSTGRES_DB: ${SENTINEL_DB_NAME:-sentinelpipe}
+      POSTGRES_USER: ${SENTINEL_DB_USERNAME:-sentinel}
+      POSTGRES_PASSWORD: ${SENTINEL_DB_PASSWORD:?SENTINEL_DB_PASSWORD must be set (see .env.example)}
+    ports:
+      - "127.0.0.1:${SENTINEL_DB_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18+ images keep PGDATA in a major-version subdirectory of /var/lib/postgresql.
+      - postgres-data:/var/lib/postgresql
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # TCP check: the temporary init-time server only listens on the Unix socket.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  rabbitmq:
+    image: rabbitmq:4.3.6-management-alpine@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
+    # A stable hostname keeps the RabbitMQ node name, and therefore its data directory, stable across restarts.
+    hostname: sentinel-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${SENTINEL_RABBITMQ_USERNAME:-sentinel}
+      RABBITMQ_DEFAULT_PASS: ${SENTINEL_RABBITMQ_PASSWORD:?SENTINEL_RABBITMQ_PASSWORD must be set (see .env.example)}
+    ports:
+      - "127.0.0.1:${SENTINEL_RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${SENTINEL_RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  opa:
+    image: openpolicyagent/opa:1.21.1@sha256:d3a9a6bd4fbcb0f4403294b0d0b239b07be163ac118a46df7d50045b52e52053
+    command:
+      - run
+      - --server
+      - --addr=0.0.0.0:8181
+      # Read-only /health and /metrics listener, reachable only inside the container.
+      - --diagnostic-addr=127.0.0.1:8282
+      # Every API request is authorized by the system.authz policy, which denies
+      # policy and data management (PUT/PATCH/DELETE) requests.
+      - --authorization=basic
+      - --skip-version-check
+      - --log-level=info
+      - /policies/authz.rego
+    ports:
+      - "127.0.0.1:${SENTINEL_OPA_PORT:-8181}:8181"
+    volumes:
+      - ./infrastructure/docker/opa:/policies:ro
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # The image has no shell or HTTP client, so OPA's own http.send performs the check.
+      test:
+        - CMD
+        - /opa
+        - eval
+        - --fail
+        - 'http.send({"method": "get", "url": "http://127.0.0.1:8282/health"}).status_code == 200'
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+volumes:
+  postgres-data:
+  rabbitmq-data:

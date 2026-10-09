@@ -1,0 +1,38 @@
+# Local development defaults only. Credentials have no defaults and must be
+# supplied via environment variables; the application fails fast without them.
+spring:
+  application:
+    name: sentinel-api
+  datasource:
+    url: jdbc:postgresql://${SENTINEL_DB_HOST:localhost}:${SENTINEL_DB_PORT:5432}/${SENTINEL_DB_NAME:sentinelpipe}
+    username: ${SENTINEL_DB_USERNAME:sentinel}
+    password: ${SENTINEL_DB_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema; Hibernate only validates it.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  rabbitmq:
+    host: ${SENTINEL_RABBITMQ_HOST:localhost}
+    port: ${SENTINEL_RABBITMQ_PORT:5672}
+    username: ${SENTINEL_RABBITMQ_USERNAME:sentinel}
+    password: ${SENTINEL_RABBITMQ_PASSWORD}
+    virtual-host: ${SENTINEL_RABBITMQ_VHOST:/}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
