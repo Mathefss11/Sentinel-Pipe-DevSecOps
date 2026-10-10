@@ -7,10 +7,12 @@ against versioned security policies, and publish actionable remediation reports 
 It is also a cybersecurity engineering portfolio project. The emphasis is on secure design,
 verifiable behavior, and honest reporting of coverage and limitations.
 
-> **Status: Milestone 1 (Foundation).** This repository currently contains the platform
-> skeleton only: the control-plane API, the worker package, local infrastructure, and CI.
-> Scanning, policy evaluation, and GitHub integration are **not implemented yet**; see
-> [Roadmap](#roadmap).
+> **Status: Milestone 2, Phase 1 (Domain model & REST contracts).** The control plane can
+> register organizations and GitHub-hosted projects, accept scan requests for specific
+> commits, and track scan and scanner-job lifecycles in PostgreSQL. **Authentication,
+> tenant authorization, scanning, policy evaluation and GitHub integration are not
+> implemented yet.** The domain API is therefore disabled by default and is meant for
+> local, loopback-only development (see [Security limitations](#current-security-limitations)).
 
 ## Architecture overview
 
@@ -47,6 +49,41 @@ Key design principles: least privilege, untrusted repository content, separation
 scanning and privileged publication, fail-closed security decisions (`PASS` / `FAIL` /
 `INCOMPLETE`), and auditable, reproducible policy evaluation. See [`SECURITY.md`](SECURITY.md).
 
+## Domain model
+
+```text
+Organization 1 ──── * Project 1 ──── * Scan 1 ──── * ScanJob
+ (tenant)        (GitHub repo)    (one commit)   (one scanner run)
+```
+
+| Entity | Key rules |
+|---|---|
+| `Organization` | Unique, immutable `slug` (`^[a-z0-9]+(-[a-z0-9]+)*$`, ≤ 63). Display names are trimmed and may not contain control characters. |
+| `Project` | Belongs to exactly one organization. Identified by provider (`GITHUB`), owner and repository name, normalized to lowercase. URLs are never accepted. A repository can be registered once per organization. Nothing is cloned or executed. |
+| `Scan` | Requested for a **full** commit SHA (40 or 64 hex characters) and a branch. `executionStatus` and `securityDecision` are independent dimensions. |
+| `ScanJob` | One scanner execution per scanner type per scan, with a bounded attempt count (max. 3). No scanner is executed yet. |
+
+**Scan lifecycle** (enforced in the entity and by database CHECK constraints):
+
+```text
+QUEUED ──▶ RUNNING ──▶ COMPLETED   (decision: PASS | FAIL | INCOMPLETE)
+  │           │
+  ├───────────┴──────▶ FAILED      (decision: always INCOMPLETE)
+  └───────────┴──────▶ CANCELLED   (decision: always INCOMPLETE)
+```
+
+- The decision is `PENDING` while the scan is `QUEUED` or `RUNNING`.
+- Terminal scans cannot change.
+- Completing execution never implies `PASS`. `PASS` is rejected unless the scan has at
+  least one job and every job `COMPLETED` (fail closed).
+- Transitions are performed only by the internal `ScanLifecycleService`. **There is no
+  public endpoint that changes scan or job state.** Trusted internal components will drive
+  transitions in later phases.
+
+> CLAUDE.md also lists `PLANNING` and `EVALUATING` stages. This phase implements the
+> reduced status set requested for M2 Phase 1. Adding those stages later needs a new
+> migration that extends the CHECK constraints.
+
 ## Repository layout
 
 ```text
@@ -55,6 +92,8 @@ scanning and privileged publication, fail-closed security decisions (`PASS` / `F
 ├── compose.yaml                    # Local PostgreSQL, RabbitMQ and OPA (loopback only)
 ├── .env.example                    # Development-only placeholder configuration
 ├── infrastructure/docker/opa/      # OPA server authorization policy and its tests
+├── packages/contracts/             # OpenAPI 3.1 and JSON Schema 2020-12 contracts
+├── docs/adr/                       # Architecture decision records
 ├── services/
 │   ├── sentinel-api/               # Spring Boot control plane (Maven Wrapper)
 │   └── sentinel-worker/            # Python worker package
@@ -139,7 +178,66 @@ Invoke-RestMethod http://127.0.0.1:8080/actuator/health
 The application deliberately refuses to start if `SENTINEL_DB_PASSWORD` or
 `SENTINEL_RABBITMQ_PASSWORD` is missing.
 
-### 4. Set up the worker
+With the default configuration, only the health endpoints exist. To use the domain API
+locally, start the application with the `local` profile. It binds the server to
+`127.0.0.1` and enables `/api/v1`:
+
+```powershell
+.\mvnw.cmd spring-boot:run "-Dspring-boot.run.profiles=local"
+```
+
+Startup fails on purpose if the domain API is enabled while `server.address` is not a
+literal loopback IP, or if a `prod`/`production` profile is active
+([ADR-0002](docs/adr/0002-domain-api-exposure-before-authentication.md)).
+
+### 4. Use the domain API (local profile)
+
+```powershell
+$api = 'http://127.0.0.1:8080/api/v1'
+
+$org = Invoke-RestMethod -Method Post "$api/organizations" -ContentType 'application/json' `
+    -Body '{"name": "Acme Security", "slug": "acme-security"}'
+
+$project = Invoke-RestMethod -Method Post "$api/organizations/$($org.id)/projects" `
+    -ContentType 'application/json' `
+    -Body '{"name": "Payments", "repositoryProvider": "GITHUB", "repositoryOwner": "acme-corp",
+            "repositoryName": "payments-service", "defaultBranch": "main"}'
+
+# 202 Accepted. Retrying with the same Idempotency-Key returns the same scan.
+$scan = Invoke-RestMethod -Method Post "$api/projects/$($project.id)/scans" `
+    -ContentType 'application/json' -Headers @{ 'Idempotency-Key' = 'manual-run-1' } `
+    -Body '{"commitSha": "4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e", "branch": "main",
+            "triggerType": "MANUAL"}'
+
+Invoke-RestMethod "$api/scans/$($scan.id)"
+Invoke-RestMethod "$api/projects/$($project.id)/scans?page=0&size=20"
+```
+
+| Method | Path | Success |
+|---|---|---|
+| `POST` | `/api/v1/organizations` | `201` + `Location` |
+| `GET` | `/api/v1/organizations/{organizationId}` | `200` |
+| `POST` | `/api/v1/organizations/{organizationId}/projects` | `201` + `Location` |
+| `GET` | `/api/v1/organizations/{organizationId}/projects?page&size` | `200` (oldest first) |
+| `GET` | `/api/v1/projects/{projectId}` | `200` |
+| `POST` | `/api/v1/projects/{projectId}/scans` | `202` + `Location`, optional `Idempotency-Key` |
+| `GET` | `/api/v1/projects/{projectId}/scans?page&size` | `200` (newest first) |
+| `GET` | `/api/v1/scans/{scanId}` | `200` (includes jobs) |
+
+Errors are RFC 9457 Problem Details (`application/problem+json`): `400` validation, malformed
+JSON or unknown property; `404` not found; `409` conflict, with a machine-readable `code`;
+`415` non-JSON body; `422` an `Idempotency-Key` reused for a different request. Error
+responses never contain stack traces, exception names or rejected input values. Pagination
+is zero-based, with `size` ≤ 100.
+
+The full contract is in [`packages/contracts`](packages/contracts/README.md).
+
+**Idempotency.** Keys are scoped per project and enforced by the database unique
+constraint `uq_scans_project_idempotency_key`, together with a SHA-256 fingerprint of the
+normalized request. Concurrent retries create at most one scan. In-memory locks are not
+relied on. Keys do not expire yet.
+
+### 5. Set up the worker
 
 ```powershell
 Set-Location services\sentinel-worker
@@ -156,7 +254,7 @@ It does not connect to external services.
 
 | Scope | Command (from the component directory) | Requires |
 |---|---|---|
-| API build, unit and integration tests | `.\mvnw.cmd clean test` (`services/sentinel-api`) | Docker (Testcontainers) |
+| API build, unit, integration and contract tests | `.\mvnw.cmd clean verify` (`services/sentinel-api`, JDK 21) | Docker (Testcontainers) |
 | Worker lint | `.\.venv\Scripts\ruff.exe check .` | — |
 | Worker formatting | `.\.venv\Scripts\ruff.exe format --check .` | — |
 | Worker tests | `.\.venv\Scripts\python.exe -m pytest` | — |
@@ -165,13 +263,24 @@ It does not connect to external services.
 
 The API integration tests start their own PostgreSQL and RabbitMQ containers through
 Testcontainers, pinned to the same image digests as `compose.yaml`. They do not use the
-Compose stack. They verify that:
+Compose stack. Two application contexts are used: the default configuration and one
+with the domain API enabled on loopback. The tests verify that:
 
 - the application context starts against real PostgreSQL and RabbitMQ;
-- Flyway applies `V001__initial_schema.sql` to a fresh database with no pending migrations;
-- Hibernate is configured to `validate` and creates no tables of its own;
-- `/actuator/health`, liveness and readiness are `UP` without exposing component details,
-  and non-health actuator endpoints are not exposed.
+- Flyway applies `V001` and `V002` to a fresh database with valid checksums and no
+  pending migrations. Hibernate only validates the schema and creates no tables;
+- `/actuator/health`, liveness and readiness are `UP` without exposing component details;
+- with the default configuration, no `/api/**` route exists. The exposure guard rejects
+  non-loopback bindings and production profiles;
+- organizations, projects and scans follow their validation, uniqueness, normalization,
+  pagination and Problem Details rules;
+- scan and job state machines reject invalid and terminal-state transitions, and `PASS`
+  is rejected without completed jobs;
+- PostgreSQL CHECK, UNIQUE and FOREIGN KEY constraints reject inconsistent rows written
+  directly with SQL;
+- idempotent scan creation is safe under concurrent retries and conflicting reuse;
+- real API responses and all OpenAPI examples validate against the JSON Schemas, and the
+  OpenAPI operations exactly match the registered endpoints.
 
 ## Continuous integration
 
@@ -208,14 +317,44 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 - [x] Python worker package with configuration, self-check, Ruff and Pytest
 - [x] GitHub Actions CI with least-privilege token and pinned actions
 - [x] `.gitignore`, `.env.example`, `README.md`, `SECURITY.md`
-- [ ] First CI run on GitHub (pending the initial push)
+- [x] First CI run on GitHub
+
+## Milestone 2, Phase 1 checklist
+
+- [x] Domain entities `Organization`, `Project`, `Scan`, `ScanJob` with enforced invariants
+- [x] Flyway migration `V002__core_domain.sql` (FKs, unique/check constraints, indexes)
+- [x] Versioned REST API under `/api/v1` with pagination and RFC 9457 errors
+- [x] Database-backed idempotent scan creation (`Idempotency-Key`)
+- [x] OpenAPI 3.1 and JSON Schema 2020-12 contracts, with automated contract tests
+- [x] Domain API disabled by default; loopback-only `local` profile with a fail-fast guard
+- [x] ADR-0001 (modular monolith) and ADR-0002 (API exposure before authentication)
+- [ ] Authentication and organization-scoped authorization (next phase)
+- [ ] Transactional outbox and event publication (next phase)
+
+## Architecture decisions
+
+- [ADR-0001: Modular monolith control plane](docs/adr/0001-modular-monolith-control-plane.md)
+- [ADR-0002: Domain API disabled until authentication exists](docs/adr/0002-domain-api-exposure-before-authentication.md)
+
+## Current security limitations
+
+- **No authentication or tenant authorization.** Any caller that can reach the API can
+  read and write every organization's data. This is why the domain API is disabled by
+  default and restricted to loopback in the `local` profile. Loopback binding is not
+  access control: other local processes can still reach it. Production-grade identity
+  and organization-scoped authorization are required before any external deployment.
+- `triggerType` and `branch` are supplied by the caller and not yet verified against
+  GitHub events or Actions OIDC claims.
+- Idempotency keys do not expire, and there is no rate limiting.
+- No scanner runs, so no real security decision is produced yet. `PASS`/`FAIL` can only
+  be set by internal code paths, which are exercised by tests.
 
 ## Roadmap
 
 | Milestone | Scope |
 |---|---|
-| **M1 — Foundation** | Current milestone (see checklist) |
-| M2 — Domain & Contracts | JSON Schemas, entities, migrations, APIs, idempotency, outbox, authorization groundwork |
+| M1 — Foundation | Complete |
+| **M2 — Domain & Contracts** | Phase 1 complete (see checklist); remaining: authorization groundwork, outbox |
 | M3 — Scanners | Discovery, Semgrep/Gitleaks/Trivy adapters, normalized findings, correlation |
 | M4 — Security Gate & Remediation | OPA policies, coverage, exceptions, decisions, remediation reports |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |

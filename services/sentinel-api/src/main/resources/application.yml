@@ -25,6 +25,34 @@ spring:
     username: ${SENTINEL_RABBITMQ_USERNAME:sentinel}
     password: ${SENTINEL_RABBITMQ_PASSWORD}
     virtual-host: ${SENTINEL_RABBITMQ_VHOST:/}
+  mvc:
+    problemdetails:
+      # Framework-level errors are rendered as RFC 9457 Problem Details.
+      enabled: true
+  web:
+    resources:
+      # The API serves no static content; unknown paths are plain 404s.
+      add-mappings: false
+  jackson:
+    deserialization:
+      # Reject unexpected request properties instead of silently ignoring them.
+      fail-on-unknown-properties: true
+
+server:
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+    include-exception: false
+
+sentinel:
+  domain-api:
+    # The domain REST API (/api/v1) has NO authentication or tenant authorization yet.
+    # It is disabled by default: its controllers are not registered and its routes do
+    # not exist. Enabling it requires a literal loopback server.address and is refused
+    # with a prod/production profile (see DomainApiExposureGuard and ADR-0002). Use the
+    # `local` profile for development.
+    enabled: false
 
 management:
   endpoints:

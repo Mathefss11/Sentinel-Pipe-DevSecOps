@@ -1,0 +1,11 @@
+# Local development profile: activate explicitly with `--spring.profiles.active=local`.
+#
+# Enables the UNAUTHENTICATED domain REST API (/api/v1) and binds the server to the
+# IPv4 loopback interface only. Never use this profile on a shared host or behind a
+# reverse proxy: anything that can reach 127.0.0.1:8080 has full API access.
+server:
+  address: 127.0.0.1
+
+sentinel:
+  domain-api:
+    enabled: true

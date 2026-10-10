@@ -1,0 +1,425 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: SentinelPipe Control Plane API
+  version: 1.0.0-m2.1
+  summary: Organizations, projects and security scan requests.
+  description: |
+    Domain REST API of the SentinelPipe control plane (Milestone 2, Phase 1).
+
+    **Security status: development only.** This API has no authentication and no
+    tenant authorization yet. It is disabled by default and can only be enabled
+    together with a literal loopback `server.address` (see ADR-0002). Knowing a
+    resource UUID is not authorization; production-grade identity and
+    organization-scoped authorization are required before any external
+    deployment.
+
+    Conventions:
+    - JSON properties use camelCase. Timestamps are UTC RFC 3339 strings with
+      microsecond precision. Identifiers are server-generated UUIDs.
+    - Unknown request properties are rejected with `400`.
+    - Errors use RFC 9457 Problem Details (`application/problem+json`).
+    - Collections use zero-based offset pagination (`page`, `size` ≤ 100).
+    - Scan lifecycle transitions are not exposed; they are reserved for trusted
+      internal components in later phases.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local development (loopback only, `local` profile)
+tags:
+  - name: Organizations
+  - name: Projects
+  - name: Scans
+
+paths:
+  /api/v1/organizations:
+    post:
+      tags: [Organizations]
+      operationId: createOrganization
+      summary: Register an organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/create-organization-request.schema.json'
+            example:
+              name: Acme Security
+              slug: acme-security
+      responses:
+        '201':
+          description: Organization created.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/organization.schema.json'
+              example:
+                id: 0b8f6a0e-6f2b-4d55-9a8b-2c0c4b3f1d10
+                name: Acme Security
+                slug: acme-security
+                createdAt: '2026-10-09T12:00:00.123456Z'
+                updatedAt: '2026-10-09T12:00:00.123456Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/organizations/{organizationId}:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationId'
+    get:
+      tags: [Organizations]
+      operationId: getOrganization
+      summary: Get an organization
+      responses:
+        '200':
+          description: The organization.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/organization.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/organizations/{organizationId}/projects:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationId'
+    post:
+      tags: [Projects]
+      operationId: createProject
+      summary: Register a GitHub repository as a project
+      description: |
+        The repository is identified by owner and name only; URLs are not
+        accepted. Owner and name are normalized to lowercase. A repository can be
+        registered once per organization (case-insensitive). No repository is
+        cloned or executed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/create-project-request.schema.json'
+            example:
+              name: Payments Service
+              repositoryProvider: GITHUB
+              repositoryOwner: Acme-Corp
+              repositoryName: payments-service
+              defaultBranch: main
+      responses:
+        '201':
+          description: Project created.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/project.schema.json'
+              example:
+                id: 6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f
+                organizationId: 0b8f6a0e-6f2b-4d55-9a8b-2c0c4b3f1d10
+                name: Payments Service
+                repositoryProvider: GITHUB
+                repositoryOwner: acme-corp
+                repositoryName: payments-service
+                defaultBranch: main
+                enabled: true
+                createdAt: '2026-10-09T12:01:00.000001Z'
+                updatedAt: '2026-10-09T12:01:00.000001Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    get:
+      tags: [Projects]
+      operationId: listProjects
+      summary: List the projects of an organization
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: A page of projects, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/project-page.schema.json'
+              example:
+                items:
+                  - id: 6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f
+                    organizationId: 0b8f6a0e-6f2b-4d55-9a8b-2c0c4b3f1d10
+                    name: Payments Service
+                    repositoryProvider: GITHUB
+                    repositoryOwner: acme-corp
+                    repositoryName: payments-service
+                    defaultBranch: main
+                    enabled: true
+                    createdAt: '2026-10-09T12:01:00.000001Z'
+                    updatedAt: '2026-10-09T12:01:00.000001Z'
+                page:
+                  number: 0
+                  size: 20
+                  totalElements: 1
+                  totalPages: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/projects/{projectId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [Projects]
+      operationId: getProject
+      summary: Get a project
+      responses:
+        '200':
+          description: The project.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/project.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/projects/{projectId}/scans:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [Scans]
+      operationId: requestScan
+      summary: Queue a security scan of one commit
+      description: |
+        Queues a scan; it does not perform one. The response is `202 Accepted`
+        with the scan in `QUEUED` / `PENDING` state.
+
+        **Idempotency.** Send an `Idempotency-Key` to make retries safe. Keys are
+        scoped to the project and enforced by a database unique constraint:
+        - same key and same request: the original scan is returned again
+          (`Idempotent-Replayed: true`, current state of that scan);
+        - same key with a different request: `422`;
+        - concurrent requests with the same key create at most one scan.
+
+        Requests without a key always create a new scan. Keys do not expire yet.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[A-Za-z0-9._:-]{1,128}$'
+          example: gh-run-123456789-attempt-1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/scan-request.schema.json'
+            example:
+              commitSha: 4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e
+              branch: feature/login
+              triggerType: PULL_REQUEST
+      responses:
+        '202':
+          description: Scan queued (or an idempotent replay of an earlier request).
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Idempotent-Replayed:
+              description: '`true` when the response replays an earlier request with the same Idempotency-Key.'
+              schema:
+                type: string
+                enum: ['true', 'false']
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/scan.schema.json'
+              example:
+                id: 9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d
+                projectId: 6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f
+                commitSha: 4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e
+                branch: feature/login
+                triggerType: PULL_REQUEST
+                executionStatus: QUEUED
+                securityDecision: PENDING
+                requestedAt: '2026-10-09T12:02:00.5Z'
+                startedAt: null
+                completedAt: null
+                jobs: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          description: The Idempotency-Key was already used for a different request.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '../schemas/v1/problem-details.schema.json'
+              example:
+                type: urn:sentinelpipe:problem:idempotency-key-reused
+                title: Idempotency key reused
+                status: 422
+                detail: The Idempotency-Key was already used for a different request.
+                instance: /api/v1/projects/6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f/scans
+    get:
+      tags: [Scans]
+      operationId: listScans
+      summary: List the scans of a project
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: A page of scans, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/scan-page.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/scans/{scanId}:
+    parameters:
+      - name: scanId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Scans]
+      operationId: getScan
+      summary: Get a scan and its scanner jobs
+      responses:
+        '200':
+          description: The scan.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/scan.schema.json'
+              example:
+                id: 9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d
+                projectId: 6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f
+                commitSha: 4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e
+                branch: feature/login
+                triggerType: PULL_REQUEST
+                executionStatus: COMPLETED
+                securityDecision: FAIL
+                requestedAt: '2026-10-09T12:02:00.5Z'
+                startedAt: '2026-10-09T12:02:05Z'
+                completedAt: '2026-10-09T12:04:30Z'
+                jobs:
+                  - id: 3c5e7a9b-0d1f-4e2a-9b3c-5d7e9f1a3b5c
+                    scanId: 9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d
+                    scannerType: SEMGREP
+                    executionStatus: COMPLETED
+                    attemptCount: 1
+                    createdAt: '2026-10-09T12:02:01Z'
+                    startedAt: '2026-10-09T12:02:06Z'
+                    completedAt: '2026-10-09T12:04:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  parameters:
+    OrganizationId:
+      name: organizationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Page:
+      name: page
+      in: query
+      required: false
+      description: Zero-based page number.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 10000
+        default: 0
+    Size:
+      name: size
+      in: query
+      required: false
+      description: Page size.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+  headers:
+    Location:
+      description: Relative URI of the created or queued resource.
+      schema:
+        type: string
+        format: uri-reference
+
+  responses:
+    BadRequest:
+      description: Invalid input (validation error, malformed JSON, unknown property, or malformed path/query parameter).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/v1/problem-details.schema.json'
+          example:
+            type: urn:sentinelpipe:problem:validation-error
+            title: Validation failed
+            status: 400
+            detail: The request contains invalid values.
+            instance: /api/v1/organizations
+            errors:
+              - field: slug
+                message: must be lowercase letters, digits or single hyphens, starting and ending with a letter or digit
+    NotFound:
+      description: The resource does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/v1/problem-details.schema.json'
+          example:
+            type: urn:sentinelpipe:problem:not-found
+            title: Resource not found
+            status: 404
+            detail: Organization was not found.
+            instance: /api/v1/organizations/0b8f6a0e-6f2b-4d55-9a8b-2c0c4b3f1d10
+    Conflict:
+      description: The request conflicts with existing state (see `code`).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/v1/problem-details.schema.json'
+          example:
+            type: urn:sentinelpipe:problem:conflict
+            title: Conflict
+            status: 409
+            detail: An organization with this slug already exists.
+            instance: /api/v1/organizations
+            code: organization-slug-taken

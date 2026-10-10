@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/scan-page.schema.json",
+  "title": "ScanPage",
+  "description": "A page of scans, ordered by request time (newest first).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "page"],
+  "properties": {
+    "items": { "type": "array", "maxItems": 100, "items": { "$ref": "scan.schema.json" } },
+    "page": { "$ref": "page-metadata.schema.json" }
+  }
+}

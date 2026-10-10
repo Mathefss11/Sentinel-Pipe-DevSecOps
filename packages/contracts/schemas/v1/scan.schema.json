@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/scan.schema.json",
+  "title": "Scan",
+  "description": "A security analysis request for one commit. executionStatus and securityDecision are independent: a COMPLETED scan may be FAIL or INCOMPLETE, and FAILED or CANCELLED scans are always INCOMPLETE.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "projectId",
+    "commitSha",
+    "branch",
+    "triggerType",
+    "executionStatus",
+    "securityDecision",
+    "requestedAt",
+    "startedAt",
+    "completedAt",
+    "jobs"
+  ],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "projectId": { "$ref": "common.schema.json#/$defs/uuid" },
+    "commitSha": { "$ref": "common.schema.json#/$defs/commitSha" },
+    "branch": { "$ref": "common.schema.json#/$defs/gitBranchName" },
+    "triggerType": { "type": "string", "enum": ["MANUAL", "PUSH", "PULL_REQUEST", "SCHEDULED"] },
+    "executionStatus": {
+      "type": "string",
+      "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
+    },
+    "securityDecision": { "type": "string", "enum": ["PENDING", "PASS", "FAIL", "INCOMPLETE"] },
+    "requestedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "startedAt": { "$ref": "common.schema.json#/$defs/nullableTimestamp" },
+    "completedAt": { "$ref": "common.schema.json#/$defs/nullableTimestamp" },
+    "jobs": { "type": "array", "items": { "$ref": "scan-job.schema.json" } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "executionStatus": { "enum": ["QUEUED", "RUNNING"] } } },
+      "then": { "properties": { "securityDecision": { "const": "PENDING" }, "completedAt": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "executionStatus": { "enum": ["FAILED", "CANCELLED"] } } },
+      "then": { "properties": { "securityDecision": { "const": "INCOMPLETE" } } }
+    },
+    {
+      "if": { "properties": { "executionStatus": { "const": "COMPLETED" } } },
+      "then": { "properties": { "securityDecision": { "enum": ["PASS", "FAIL", "INCOMPLETE"] } } }
+    }
+  ]
+}

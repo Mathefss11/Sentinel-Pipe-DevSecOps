@@ -2,7 +2,7 @@
 
 ## Project status
 
-SentinelPipe is pre-release software under active development (Milestone 1: Foundation).
+SentinelPipe is pre-release software under active development (Milestone 2, Phase 1: domain model and REST contracts).
 It is not yet intended for production use, and no version is currently supported for
 production deployments. Security fixes are applied to the `main` branch.
 
@@ -40,9 +40,9 @@ Out of scope:
   `127.0.0.1` or run with placeholder credentials outside a workstation;
 - the intentionally vulnerable example applications planned under `examples/`.
 
-## Security baseline (Milestone 1)
+## Security baseline
 
-The current foundation implements the following controls:
+The current version implements the following controls:
 
 - **Secrets:** no credentials are committed. Passwords have no defaults in the application
   configuration or in `compose.yaml`. Both fail to start if a password is missing. `.env` is
@@ -54,8 +54,19 @@ The current foundation implements the following controls:
   policy. It permits health checks and decision queries and rejects policy and data
   management requests. The container runs as a non-root user with a read-only root
   filesystem, all Linux capabilities dropped, and `no-new-privileges`.
-- **API surface:** only the Actuator health endpoint is exposed over HTTP, without component
-  details.
+- **API surface:** by default, only the Actuator health endpoints are exposed, without
+  component details. The unauthenticated domain API (`/api/v1`) is registered only when
+  `sentinel.domain-api.enabled=true`. Startup then fails unless `server.address` is a
+  literal loopback IP and no `prod`/`production` profile is active (ADR-0002). There is no
+  public endpoint that changes scan or job state.
+- **Input handling:** request bodies reject unknown properties. Repository identity is
+  accepted only as validated owner and name, never as a URL. Commit SHAs must be full
+  object names, and branch names are restricted to a conservative character set. Errors are
+  RFC 9457 Problem Details without stack traces, exception names, SQL or echoed input
+  values.
+- **Fail-closed scan state:** failed or cancelled scans are always `INCOMPLETE`, and `PASS`
+  requires every scanner job to have completed. These invariants are enforced in code and
+  by PostgreSQL CHECK constraints.
 - **Database:** the schema is managed exclusively by versioned Flyway migrations. Hibernate
   only validates the schema.
 - **CI:** GitHub Actions runs with a read-only token (`contents: read`). Checkout credentials
@@ -64,8 +75,12 @@ The current foundation implements the following controls:
 
 ## Known limitations
 
-- The API has no authentication or authorization yet. Tenant-scoped authorization is planned
-  for Milestone 2. Do not expose the API to untrusted networks.
+- The API has no authentication or authorization yet. Any caller that can reach the domain
+  API can access every organization's data. Loopback binding is a development safeguard,
+  not access control. Tenant-scoped authorization is planned for the next M2 phase. Do not
+  expose the API to untrusted networks, and do not use the `local` profile on shared hosts.
+- Scan `triggerType` and `branch` are caller-supplied and not yet verified against GitHub
+  events or OIDC claims. Idempotency keys do not expire, and there is no rate limiting.
 - The Compose stack is for local development only. It does not use TLS between services, and
   OPA does not authenticate clients.
 - Scanner execution, evidence integrity verification, GitHub webhook and OIDC validation, and

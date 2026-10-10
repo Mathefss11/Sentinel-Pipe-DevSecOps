@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/problem-details.schema.json",
+  "title": "ProblemDetails",
+  "description": "RFC 9457 Problem Details (media type application/problem+json). Never contains stack traces, exception names, SQL or echoed input values. SentinelPipe problem types are URNs of the form urn:sentinelpipe:problem:<name>; framework errors may use about:blank.",
+  "type": "object",
+  "required": ["type", "title", "status"],
+  "properties": {
+    "type": { "type": "string", "format": "uri-reference" },
+    "title": { "type": "string" },
+    "status": { "type": "integer", "minimum": 400, "maximum": 599 },
+    "detail": { "type": "string" },
+    "instance": { "type": "string", "format": "uri-reference" },
+    "code": {
+      "description": "Stable machine-readable conflict code (409 responses).",
+      "type": "string",
+      "enum": ["organization-slug-taken", "repository-already-registered", "project-disabled"]
+    },
+    "errors": {
+      "description": "Field-level validation errors (400 validation-error responses).",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "message"],
+        "properties": {
+          "field": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      }
+    }
+  }
+}

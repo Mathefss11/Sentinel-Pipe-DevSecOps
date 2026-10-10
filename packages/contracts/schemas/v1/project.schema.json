@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/project.schema.json",
+  "title": "Project",
+  "description": "A GitHub repository registered for security scanning. Repository owner and name are stored in lowercase.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "organizationId",
+    "name",
+    "repositoryProvider",
+    "repositoryOwner",
+    "repositoryName",
+    "defaultBranch",
+    "enabled",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "organizationId": { "$ref": "common.schema.json#/$defs/uuid" },
+    "name": { "$ref": "common.schema.json#/$defs/displayName" },
+    "repositoryProvider": { "type": "string", "enum": ["GITHUB"] },
+    "repositoryOwner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 39,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "repositoryName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^(?!\\.{1,2}$)(?!.*\\.git$)[a-z0-9._-]+$"
+    },
+    "defaultBranch": { "$ref": "common.schema.json#/$defs/gitBranchName" },
+    "enabled": { "type": "boolean", "description": "Disabled projects do not accept scan requests." },
+    "createdAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "updatedAt": { "$ref": "common.schema.json#/$defs/timestamp" }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/common.schema.json",
+  "title": "SentinelPipe v1 common definitions",
+  "description": "Shared value types referenced by the other v1 schemas.",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "timestamp": {
+      "description": "UTC instant in RFC 3339 format, microsecond precision.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "nullableTimestamp": {
+      "description": "UTC instant in RFC 3339 format, or null when the event has not happened.",
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "displayName": {
+      "description": "Human-readable name. Leading and trailing whitespace is removed by the server. Control characters are rejected.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F]*$"
+    },
+    "gitBranchName": {
+      "description": "Short Git branch name (for example 'main' or 'feature/login'). Conservative subset of git check-ref-format: ASCII letters, digits, '.', '_', '-' and '/'. Full refs ('refs/...'), 'HEAD', '..', '//', components starting with '.' or ending with '.lock', and trailing '/' or '.' are rejected. Case-sensitive.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?![-/.])(?!refs/)(?!HEAD$)(?!.*\\.\\.)(?!.*//)(?!.*/\\.)(?!.*\\.lock(/|$))(?!.*[/.]$)[A-Za-z0-9._/-]+$"
+    },
+    "commitSha": {
+      "description": "Full Git commit object name: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    }
+  }
+}

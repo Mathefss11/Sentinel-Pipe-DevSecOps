@@ -22,22 +22,31 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 	private EntityManagerFactory entityManagerFactory;
 
 	@Test
-	void initialMigrationIsAppliedSuccessfully() {
+	void allMigrationsAreAppliedInOrderToAFreshDatabase() {
 		List<Map<String, Object>> history = jdbcTemplate.queryForList(
 				"SELECT script, success FROM flyway_schema_history WHERE version IS NOT NULL ORDER BY installed_rank");
 
-		assertThat(history).hasSize(1);
-		assertThat(history.getFirst()).containsEntry("script", "V001__initial_schema.sql")
-			.containsEntry("success", true);
+		assertThat(history).extracting((row) -> row.get("script"))
+			.containsExactly("V001__initial_schema.sql", "V002__core_domain.sql");
+		assertThat(history).allSatisfy((row) -> assertThat(row).containsEntry("success", true));
 		assertThat(flyway.info().pending()).isEmpty();
+	}
+
+	@Test
+	void appliedMigrationsMatchTheirChecksums() {
+		// Fails if a previously applied migration file was edited.
+		assertThat(flyway.validateWithResult().validationSuccessful).isTrue();
 	}
 
 	@Test
 	void baselineMetadataIsRecorded() {
 		String baseline = jdbcTemplate.queryForObject(
 				"SELECT metadata_value FROM platform_metadata WHERE metadata_key = 'schema.baseline'", String.class);
+		String coreDomain = jdbcTemplate.queryForObject(
+				"SELECT metadata_value FROM platform_metadata WHERE metadata_key = 'schema.core_domain'", String.class);
 
 		assertThat(baseline).isEqualTo("m1-foundation");
+		assertThat(coreDomain).isEqualTo("m2-phase1");
 	}
 
 	@Test
@@ -48,7 +57,9 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 				"SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
 				String.class);
 
-		assertThat(tables).containsExactly("flyway_schema_history", "platform_metadata");
+		// Exactly the tables created by Flyway migrations; Hibernate creates none.
+		assertThat(tables).containsExactly("flyway_schema_history", "organizations", "platform_metadata", "projects",
+				"scan_jobs", "scans");
 	}
 
 }

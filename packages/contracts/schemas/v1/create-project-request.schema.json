@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/create-project-request.schema.json",
+  "title": "CreateProjectRequest",
+  "description": "Request body for registering a GitHub repository. Repository URLs are not accepted. Owner and name are case-insensitive and normalized to lowercase. Unknown properties are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "repositoryProvider", "repositoryOwner", "repositoryName", "defaultBranch"],
+  "properties": {
+    "name": { "$ref": "common.schema.json#/$defs/displayName" },
+    "repositoryProvider": { "type": "string", "enum": ["GITHUB"] },
+    "repositoryOwner": {
+      "description": "GitHub user or organization name.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 39,
+      "pattern": "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$"
+    },
+    "repositoryName": {
+      "description": "GitHub repository name, without a '.git' suffix.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^(?!\\.{1,2}$)(?!.*\\.[Gg][Ii][Tt]$)[A-Za-z0-9._-]+$"
+    },
+    "defaultBranch": { "$ref": "common.schema.json#/$defs/gitBranchName" }
+  }
+}

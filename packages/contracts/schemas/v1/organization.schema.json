@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/organization.schema.json",
+  "title": "Organization",
+  "description": "An organization (tenant) that owns projects.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "slug", "createdAt", "updatedAt"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/uuid", "description": "Server-generated identifier." },
+    "name": { "$ref": "common.schema.json#/$defs/displayName" },
+    "slug": {
+      "description": "Unique, immutable, URL-safe identifier.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "createdAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "updatedAt": { "$ref": "common.schema.json#/$defs/timestamp" }
+  }
+}

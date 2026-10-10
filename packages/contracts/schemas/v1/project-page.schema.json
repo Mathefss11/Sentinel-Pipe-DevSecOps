@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/project-page.schema.json",
+  "title": "ProjectPage",
+  "description": "A page of projects, ordered by creation time (oldest first).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "page"],
+  "properties": {
+    "items": { "type": "array", "maxItems": 100, "items": { "$ref": "project.schema.json" } },
+    "page": { "$ref": "page-metadata.schema.json" }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/scan-request.schema.json",
+  "title": "ScanRequest",
+  "description": "Request body for queueing a security scan of one commit. Identifiers, statuses and timestamps are server-generated and cannot be supplied. Unknown properties are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["commitSha", "branch", "triggerType"],
+  "properties": {
+    "commitSha": {
+      "description": "Full commit SHA (40 or 64 hexadecimal characters, case-insensitive; normalized to lowercase). Abbreviated SHAs and ref names are rejected.",
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$"
+    },
+    "branch": { "$ref": "common.schema.json#/$defs/gitBranchName" },
+    "triggerType": {
+      "description": "Informational. Not yet verified against GitHub events or OIDC claims.",
+      "type": "string",
+      "enum": ["MANUAL", "PUSH", "PULL_REQUEST", "SCHEDULED"]
+    }
+  }
+}

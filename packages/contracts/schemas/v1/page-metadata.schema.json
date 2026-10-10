@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/page-metadata.schema.json",
+  "title": "PageMetadata",
+  "description": "Offset pagination metadata. 'number' is zero-based.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["number", "size", "totalElements", "totalPages"],
+  "properties": {
+    "number": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "size": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "totalElements": { "type": "integer", "minimum": 0 },
+    "totalPages": { "type": "integer", "minimum": 0 }
+  }
+}

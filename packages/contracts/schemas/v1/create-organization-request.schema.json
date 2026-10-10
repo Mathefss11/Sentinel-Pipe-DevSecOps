@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/create-organization-request.schema.json",
+  "title": "CreateOrganizationRequest",
+  "description": "Request body for registering an organization. Unknown properties are rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "slug"],
+  "properties": {
+    "name": { "$ref": "common.schema.json#/$defs/displayName" },
+    "slug": {
+      "description": "Lowercase letters, digits and single hyphens; must start and end with a letter or digit.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    }
+  }
+}
