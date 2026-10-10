@@ -111,7 +111,8 @@ sentinel:
   execution:
     # Harmless FIXTURE scanner for development, CI and tests. Refused under prod profiles.
     fixture-enabled: false
-    # Jobs planned automatically for each new scan. No real scanner is executable yet.
+    # Jobs planned automatically for each new scan: FIXTURE and/or GITLEAKS (GITLEAKS scans
+    # local synthetic repositories only and is refused under production profiles).
     planned-scanners: []
     lease-duration: 60s
     execution-timeout: 15m

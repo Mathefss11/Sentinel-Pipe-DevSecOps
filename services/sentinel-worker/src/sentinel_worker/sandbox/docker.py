@@ -5,7 +5,8 @@ Lifecycle of :meth:`DockerSandbox.run`:
 1. **create and start** ``docker run`` with the arguments of :mod:`.policy` (no shell on the
    host; the Docker CLI receives a sanitized environment without ``SENTINEL_*`` variables);
 2. **controlled execution**: stdout and stderr are read by bounded readers (excess is
-   drained and discarded, never buffered); stdin is closed;
+   drained and discarded, never buffered); stdin is closed, or, for scanners that need
+   repository input, carries one bounded, worker-built archive and is then closed;
 3. **resource monitoring**: ``docker stats`` is sampled for peak PIDs and memory;
 4. **timeout**, **cancellation** (the caller's stop event, set on job cancellation, lease
    loss or shutdown) and **output overflow** each trigger
@@ -106,6 +107,26 @@ def cli_environment(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     (database and broker credentials never reach the runtime tooling)."""
     source = os.environ if environ is None else environ
     return {key: value for key, value in source.items() if not key.upper().startswith("SENTINEL_")}
+
+
+class _StdinWriter(threading.Thread):
+    """Writes the input once and closes the pipe. A sandbox that stops reading (it exited
+    or was killed) ends the write with a broken pipe, which is not an error here: the
+    outcome is decided by the exit status and the output."""
+
+    def __init__(self, stream: IO[bytes], data: bytes) -> None:
+        super().__init__(daemon=True, name="sentinel-sandbox-writer")
+        self._stream = stream
+        self._data = data
+
+    def run(self) -> None:
+        with contextlib.suppress(OSError, ValueError):
+            view = memoryview(self._data)
+            for offset in range(0, len(view), _CHUNK):
+                self._stream.write(view[offset : offset + _CHUNK])
+            self._stream.flush()
+        with contextlib.suppress(OSError, ValueError):
+            self._stream.close()
 
 
 class _BoundedReader(threading.Thread):
@@ -210,11 +231,11 @@ class DockerCli:
         except OSError as exc:
             raise SandboxError("container runtime unavailable") from exc
 
-    def start(self, arguments: Sequence[str]) -> subprocess.Popen[bytes]:
+    def start(self, arguments: Sequence[str], stdin: bool = False) -> subprocess.Popen[bytes]:
         try:
             return subprocess.Popen(  # noqa: S603 - fixed executable, argument vector, no shell
                 [self.executable, *arguments],
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if stdin else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=self._env,
@@ -244,9 +265,14 @@ class DockerSandbox:
         stop: threading.Event,
         timeout_seconds: float | None = None,
         job_id: str | None = None,
+        stdin: bytes | None = None,
     ) -> SandboxRun:
+        """Runs ``argv`` once. ``stdin``, if given, is written to the process and closed;
+        it must fit the policy's ``max_stdin_bytes``."""
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise ValueError("timeout must be positive")
+        if stdin is not None and len(stdin) > self.policy.max_stdin_bytes:
+            raise ValueError("sandbox input exceeds the policy's stdin limit")
         timeout = min(
             timeout_seconds if timeout_seconds is not None else self.policy.timeout_seconds,
             self.policy.timeout_seconds,
@@ -257,15 +283,28 @@ class DockerSandbox:
         name = new_sandbox_name()
         labels = {"sentinelpipe.job": job_id} if job_id else {}
         expires_at = int(self._wall_clock() + timeout + self.policy.expiry_grace_seconds)
-        arguments = run_arguments(self.policy, name, argv, labels, expires_at)
+        arguments = run_arguments(
+            self.policy, name, argv, labels, expires_at, interactive=stdin is not None
+        )
         started = self._clock()
-        process = self._docker.start(arguments)
+        process = (
+            self._docker.start(arguments, stdin=True)
+            if stdin is not None
+            else self._docker.start(arguments)
+        )
         if process.stdout is None or process.stderr is None:  # pragma: no cover - PIPE
             raise SandboxError("sandbox streams unavailable")
         stdout = _BoundedReader(process.stdout, self.policy.max_stdout_bytes)
         stderr = _BoundedReader(process.stderr, self.policy.max_stderr_bytes)
         monitor = _Monitor(self._docker, name, self._monitor_interval)
-        for thread in (stdout, stderr, monitor):
+        threads: list[threading.Thread] = [stdout, stderr, monitor]
+        writer = None
+        if stdin is not None:
+            if process.stdin is None:  # pragma: no cover - PIPE
+                raise SandboxError("sandbox input unavailable")
+            writer = _StdinWriter(process.stdin, stdin)
+            threads.append(writer)
+        for thread in threads:
             thread.start()
         reason: SandboxStatus | None = None
         removed = False
@@ -294,6 +333,11 @@ class DockerSandbox:
             monitor.stop()
             if process.poll() is None:
                 process.kill()
+            if writer is not None:
+                if process.stdin is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        process.stdin.close()
+                writer.join(timeout=10)
             removed = self.remove(name)
         duration = self._clock() - started
         status, exit_code = self._classify(reason, state, stdout.overflowed, monitor.peak_pids)

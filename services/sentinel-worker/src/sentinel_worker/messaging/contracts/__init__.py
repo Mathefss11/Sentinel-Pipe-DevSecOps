@@ -61,6 +61,7 @@ PROCESSING_RECEIPT_SCHEMA = "processing-receipt.v1.schema.json"
 DEAD_LETTER_METADATA_SCHEMA = "dead-letter-metadata.v1.schema.json"
 JOB_RESULT_SCHEMA = "job-result.v1.schema.json"
 SANDBOX_OUTPUT_SCHEMA = "sandbox-output.v1.schema.json"
+FINDINGS_SCHEMA = "findings.v1.schema.json"
 TOPOLOGY = "topology.v1.json"
 
 BUNDLED_FILES = (
@@ -69,6 +70,7 @@ BUNDLED_FILES = (
     DEAD_LETTER_METADATA_SCHEMA,
     JOB_RESULT_SCHEMA,
     SANDBOX_OUTPUT_SCHEMA,
+    FINDINGS_SCHEMA,
     TOPOLOGY,
 )
 

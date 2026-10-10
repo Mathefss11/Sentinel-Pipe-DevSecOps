@@ -19,15 +19,19 @@ import dev.sentinelpipe.api.scan.ScanLifecycleService;
 import dev.sentinelpipe.api.scanjob.ScannerType;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.JsonNode;
@@ -37,7 +41,9 @@ import tools.jackson.databind.JsonNode;
  * execute}, harmless FIXTURE scanner in a real sandbox container, ADR-0009) and its real
  * least-privileged database login:
  * REST request, lease claim, heartbeats, report, supervisor evaluation, REST read; REST
- * cancellation of a running job; and recovery after the worker process is killed.
+ * cancellation of a running job; recovery after the worker process is killed; and the
+ * GITLEAKS scanner on synthetic repositories (real Gitleaks container, ADR-0010), whose
+ * redacted findings are stored as verified evidence without ever producing PASS.
  *
  * <p>
  * Requires {@code -Pe2e -Dsentinel.e2e.python=<python with sentinel-worker installed>}.
@@ -77,6 +83,11 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 
 	/** Starts {@code sentinel-worker execute} with the worker's own database login. */
 	private Process startWorker(double fixtureSeconds, String... arguments) throws IOException {
+		return startWorker(fixtureSeconds, Map.of(), arguments);
+	}
+
+	private Process startWorker(double fixtureSeconds, Map<String, String> extraEnv, String... arguments)
+			throws IOException {
 		List<String> command = new java.util.ArrayList<>(List.of(python(), "-m", "sentinel_worker", "execute"));
 		command.addAll(List.of(arguments));
 		ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
@@ -92,6 +103,7 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 		env.put("SENTINEL_WORKER_FIXTURE_ENABLED", "true");
 		env.put("SENTINEL_WORKER_FIXTURE_SECONDS", String.valueOf(fixtureSeconds));
 		env.put("SENTINEL_WORKER_EXECUTION_POLL_SECONDS", "0.2");
+		env.putAll(extraEnv);
 		return builder.start();
 	}
 
@@ -259,6 +271,149 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 		assertThat(recovered.at("/jobs/0/attemptCount").asInt()).isEqualTo(2);
 		assertThat(recovered.get("executionStatus").asString()).isEqualTo("COMPLETED");
 		assertThat(recovered.get("securityDecision").asString()).isEqualTo("INCOMPLETE");
+	}
+
+	// --- Gitleaks (ADR-0010) ------------------------------------------------------------
+
+	@TempDir
+	private Path fixtures;
+
+	/**
+	 * A synthetic GitHub token, assembled at run time so that no credential-shaped literal
+	 * exists in the source tree. It is not a real credential.
+	 */
+	private static String syntheticToken(char fill) {
+		return "ghp" + "_" + "Sx9" + String.valueOf(fill).repeat(3) + "Q7mK2pLw4Rt8Vy1Zb6Nc3Hd5Jf0Gs" + fill;
+	}
+
+	private Map<String, String> gitleaksWorker() {
+		Map<String, String> env = new HashMap<>();
+		env.put("SENTINEL_WORKER_FIXTURE_ENABLED", "false");
+		env.put("SENTINEL_WORKER_GITLEAKS_ENABLED", "true");
+		env.put("SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR", this.fixtures.toAbsolutePath().toString());
+		return env;
+	}
+
+	/** A project whose repository acme/{name} is a synthetic fixture with these files. */
+	private UUID gitleaksScan(String name, Map<String, String> files) throws Exception {
+		Path repository = Files.createDirectories(this.fixtures.resolve("acme").resolve(name));
+		for (Map.Entry<String, String> file : files.entrySet()) {
+			Path target = repository.resolve(file.getKey());
+			Files.createDirectories(target.getParent());
+			Files.writeString(target, file.getValue(), StandardCharsets.UTF_8);
+		}
+		UUID projectId = createProject(createOrganization(), name);
+		UUID scanId = UUID.fromString(json(requestScan(projectId, randomSha(), null)).get("id").asString());
+		this.lifecycle.planJob(scanId, ScannerType.GITLEAKS);
+		return scanId;
+	}
+
+	private JsonNode findings(UUID jobId) {
+		List<EvidenceArtifact> artifacts = this.evidenceStore.list(jobId);
+		assertThat(artifacts).extracting(EvidenceArtifact::name).containsExactly("findings.json");
+		EvidenceArtifact artifact = artifacts.get(0);
+		Evidence evidence = this.evidenceStore.read(jobId, artifact.leaseEpoch(), artifact.name()).orElseThrow();
+		assertThat(EvidenceVerifier.sha256(evidence.content())).isEqualTo(artifact.sha256());
+		JsonNode document = json(new String(evidence.content(), StandardCharsets.UTF_8));
+		ContractSchemas.assertValidMessage("findings.v1.schema.json", document);
+		return document;
+	}
+
+	private void assertCompletedButNeverPass(UUID scanId) throws Exception {
+		assertThat(scan(scanId).get("executionStatus").asString()).isEqualTo("EVALUATING");
+		this.supervisor.runOnce();
+		JsonNode completed = scan(scanId);
+		assertThat(completed.at("/jobs/0/executionStatus").asString()).isEqualTo("COMPLETED");
+		assertThat(completed.get("executionStatus").asString()).isEqualTo("COMPLETED");
+		assertThat(completed.get("securityDecision").asString()).isEqualTo("INCOMPLETE");
+		assertThat(completed.get("decisionReason").asString()).isEqualTo("POLICY_EVALUATION_UNAVAILABLE");
+	}
+
+	@Test
+	void gitleaksFindsSyntheticSecretsAndStoresOnlyRedactedFindings() throws Exception {
+		String token = syntheticToken('A');
+		String allowed = syntheticToken('B');
+		String inName = syntheticToken('C');
+		UUID scanId = gitleaksScan("leaky-" + UUID.randomUUID().toString().substring(0, 8), Map.of(
+				"src/settings.py", "DEBUG = False\nGITHUB_TOKEN = \"" + token + "\"\n",
+				// Repository-controlled suppression must not hide findings.
+				"tools/deploy.py", "TOKEN = \"" + allowed + "\"  # gitleaks:allow\n",
+				".gitleaks.toml", "title = \"allow everything\"\n[allowlist]\npaths = ['''.*''']\n",
+				".gitleaksignore", "src/settings.py:github-pat:2\n",
+				"README.md", "Synthetic test repository.\n",
+				// A credential committed as a file name (security review D2).
+				"keys/" + inName + ".txt", "harmless\n",
+				// A file name upstream's default ruleset would skip (security review D1).
+				"assets/logo.png", "KEY = \"" + token + "\"\n"));
+
+		String output = finish(startWorker(0, gitleaksWorker(), "--idle-timeout", "3"));
+
+		assertThat(output).contains("scanner.completed")
+			.doesNotContain(token)
+			.doesNotContain(allowed)
+			.doesNotContain(inName);
+		UUID jobId = this.jdbcTemplate.queryForObject("SELECT id FROM scan_jobs WHERE scan_id = ?", UUID.class,
+				scanId);
+		JsonNode document = findings(jobId);
+		assertThat(document.toString()).doesNotContain(token).doesNotContain(allowed).doesNotContain(inName);
+		assertThat(document.at("/scanner/version").asString()).isEqualTo("8.30.1");
+		assertThat(document.at("/context/job_id").asString()).isEqualTo(jobId.toString());
+		assertThat(document.at("/execution/status").asString()).isEqualTo("FINDINGS_DETECTED");
+		assertThat(document.at("/execution/exit_code").asInt()).as("content and file-name leaks").isEqualTo(43);
+		assertThat(document.at("/input/commit_verified").asBoolean()).isFalse();
+		assertThat(document.at("/input/skipped/suppression_file").asInt()).isEqualTo(1);
+		// Both files are reported despite the suppression attempts; overlapping built-in rules
+		// (for example generic-api-key) may add distinct findings at the same location.
+		assertThat(document.get("finding_count").asInt()).isEqualTo(document.get("findings").size());
+		List<String> located = new java.util.ArrayList<>();
+		for (JsonNode finding : document.get("findings")) {
+			located.add(finding.at("/location/path").asString() + ":" + finding.get("rule_id").asString());
+		}
+		assertThat(located).contains("src/settings.py:github-pat", "tools/deploy.py:github-pat",
+				"assets/logo.png:github-pat", "keys/[redacted-1]:github-pat");
+		assertThat(document.get("findings").findValuesAsString("path")).containsOnly("src/settings.py",
+				"tools/deploy.py", "assets/logo.png", "keys/[redacted-1]");
+		assertThat(document.at("/input/paths_redacted").asInt()).isEqualTo(1);
+		for (JsonNode finding : document.get("findings")) {
+			assertThat(finding.at("/evidence/redacted").asBoolean()).isTrue();
+			assertThat(finding.at("/evidence/excerpt").isNull()).isTrue();
+			assertThat(finding.get("severity").isNull()).as("Gitleaks provides no severity").isTrue();
+		}
+		// No raw secret anywhere in stored evidence or results, for any tenant.
+		assertThat(this.jdbcTemplate.queryForObject(
+				"SELECT count(*) FROM evidence.objects WHERE position(? IN content) > 0 OR position(? IN content) > 0"
+						+ " OR position(? IN content) > 0",
+				Integer.class, token.getBytes(StandardCharsets.UTF_8), allowed.getBytes(StandardCharsets.UTF_8),
+				inName.getBytes(StandardCharsets.UTF_8)))
+			.isZero();
+		for (String secret : List.of(token, allowed, inName)) {
+			assertThat(this.jdbcTemplate.queryForObject(
+					"SELECT (SELECT count(*) FROM lifecycle.job_reports WHERE position(? IN result::text) > 0)"
+							+ " + (SELECT count(*) FROM lifecycle.execution_events e"
+							+ " WHERE position(? IN row_to_json(e)::text) > 0)",
+					Integer.class, secret, secret))
+				.isZero();
+		}
+		assertThat(sandboxes(jobId)).isEmpty();
+		// Findings are evidence, not a decision: without policy evaluation the scan is INCOMPLETE.
+		assertCompletedButNeverPass(scanId);
+	}
+
+	@Test
+	void aCleanGitleaksScanIsNeverPass() throws Exception {
+		UUID scanId = gitleaksScan("clean-" + UUID.randomUUID().toString().substring(0, 8),
+				Map.of("app.py", "print('hello')\n", "docs/notes.txt", "Nothing sensitive here.\n"));
+
+		finish(startWorker(0, gitleaksWorker(), "--idle-timeout", "3"));
+
+		UUID jobId = this.jdbcTemplate.queryForObject("SELECT id FROM scan_jobs WHERE scan_id = ?", UUID.class,
+				scanId);
+		JsonNode document = findings(jobId);
+		assertThat(document.get("finding_count").asInt()).isZero();
+		assertThat(document.at("/execution/status").asString()).isEqualTo("NO_FINDINGS");
+		assertThat(document.at("/input/files_scanned").asInt()).isEqualTo(2);
+		assertThat(sandboxes(jobId)).isEmpty();
+		assertCompletedButNeverPass(scanId);
 	}
 
 }

@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/messages/v1/findings.v1.schema.json",
+  "title": "Normalized findings v1",
+  "description": "Evidence document produced by the worker from one scanner run (ADR-0010): normalized, redacted findings plus the input and coverage they apply to. Stored as the `findings.json` artifact of a job result (ADR-0008). Canonical serialization (UTF-8/ASCII, keys sorted, no whitespace); findings sorted by path, line, column, rule and fingerprint. Findings are observations, not a security decision: a document without findings does not mean PASS, and findings do not by themselves mean FAIL (policy evaluation, M4). Severity, confidence and remediation are null unless the scanner itself provides them. Secret findings never carry an excerpt of the detected value. Paths are persisted only in a safe form: components that look like or were detected as secrets are replaced by `[redacted-N]` labels (best-effort, not a guarantee).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scanner", "context", "input", "coverage", "execution", "finding_count", "findings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "image"],
+      "properties": {
+        "name": { "$ref": "#/$defs/scannerName" },
+        "version": { "$ref": "#/$defs/scannerVersion" },
+        "image": { "type": "string", "pattern": "^[a-z0-9./-]{1,200}@sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "context": {
+      "description": "The authoritative job context from the database lease.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization_id", "project_id", "scan_id", "job_id", "commit_sha"],
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "project_id": { "$ref": "#/$defs/uuid" },
+        "scan_id": { "$ref": "#/$defs/uuid" },
+        "job_id": { "$ref": "#/$defs/uuid" },
+        "commit_sha": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "commit_verified", "content_sha256", "files_scanned", "bytes_scanned", "paths_redacted", "skipped"],
+      "properties": {
+        "kind": {
+          "description": "LOCAL_FIXTURE: synthetic repository content configured on the worker (development and CI); it is not fetched from the commit.",
+          "enum": ["LOCAL_FIXTURE"]
+        },
+        "commit_verified": {
+          "description": "Whether the scanned bytes were verified to be the commit in `context`. Always false for LOCAL_FIXTURE.",
+          "type": "boolean"
+        },
+        "content_sha256": {
+          "description": "SHA-256 over `path NUL sha256(content) LF` for every scanned file in path order. It cannot be inverted, but it can confirm a guess of the entire snapshot content; it must not be published outside the tenant without review.",
+          "$ref": "#/$defs/sha256"
+        },
+        "files_scanned": { "type": "integer", "minimum": 0, "maximum": 5000 },
+        "bytes_scanned": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "paths_redacted": {
+          "description": "Number of scanned files whose path contains at least one redacted component.",
+          "type": "integer", "minimum": 0, "maximum": 5000
+        },
+        "skipped": {
+          "description": "Entries left out of the snapshot, by reason. symlink, special_file, hardlink, oversized and unsupported_name make coverage incomplete; vcs_metadata (.git) and suppression_file (root .gitleaksignore) are excluded by design.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["symlink", "special_file", "hardlink", "oversized", "unsupported_name", "vcs_metadata", "suppression_file"],
+          "properties": {
+            "symlink": { "$ref": "#/$defs/count" },
+            "special_file": { "$ref": "#/$defs/count" },
+            "hardlink": { "$ref": "#/$defs/count" },
+            "oversized": { "$ref": "#/$defs/count" },
+            "unsupported_name": { "$ref": "#/$defs/count" },
+            "vcs_metadata": { "$ref": "#/$defs/count" },
+            "suppression_file": { "$ref": "#/$defs/count" }
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "limitations"],
+      "properties": {
+        "complete": {
+          "description": "False when scannable files were skipped. Even when true, coverage is bounded by `limitations`.",
+          "type": "boolean"
+        },
+        "limitations": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["FILES_SKIPPED", "EMPTY_INPUT", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "ARCHIVES_NOT_SCANNED", "RULESET_DEFAULT_ONLY"]
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "exit_code", "raw_report_sha256"],
+      "properties": {
+        "status": {
+          "description": "How the scanner run ended. Failed runs never produce this document.",
+          "enum": ["NO_FINDINGS", "FINDINGS_DETECTED"]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "raw_report_sha256": {
+          "description": "SHA-256 of the scanner's (already redacted) native reports, which are parsed but not stored. For Gitleaks: sha256(content report || NUL || paths report).",
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "finding_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
+    "findings": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "#/$defs/finding" }
+    }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "count": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "line": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000000 },
+    "column": { "type": ["integer", "null"], "minimum": 0, "maximum": 10000000 },
+    "scannerName": { "enum": ["gitleaks"] },
+    "scannerVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "fingerprint", "scanner", "rule_id", "category", "description", "location", "severity", "confidence", "evidence", "remediation", "status", "occurrences"],
+      "properties": {
+        "id": {
+          "description": "Deterministic per job: UUIDv5 of the job id and fingerprint.",
+          "$ref": "#/$defs/uuid"
+        },
+        "fingerprint": {
+          "description": "SHA-256 of the canonical JSON array [\"sentinelpipe.finding.v1\", scanner, rule_id, target, safe path, start_line, end_line, start_column, end_column]. Contains no secret value and no raw path. Identical fingerprints within one run are merged (`occurrences`).",
+          "$ref": "#/$defs/sha256"
+        },
+        "scanner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "$ref": "#/$defs/scannerName" },
+            "version": { "$ref": "#/$defs/scannerVersion" }
+          }
+        },
+        "rule_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+        "category": { "enum": ["SECRET"] },
+        "description": { "type": ["string", "null"], "maxLength": 512 },
+        "location": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target", "path", "path_redacted", "start_line", "end_line", "start_column", "end_column"],
+          "properties": {
+            "target": {
+              "description": "FILE_CONTENT: the secret is in the file's content (lines and columns set). FILE_PATH: the secret is in the file's path (lines and columns null; the path is redacted).",
+              "enum": ["FILE_CONTENT", "FILE_PATH"]
+            },
+            "path_redacted": { "type": "boolean" },
+            "path": {
+              "description": "Safe relative POSIX path of a file in the scanned snapshot; redacted components appear as [redacted-N].",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^[^/\\u0000-\\u001f\\u007f-\\u009f\\\\][^\\u0000-\\u001f\\u007f-\\u009f\\\\]*$"
+            },
+            "start_line": { "$ref": "#/$defs/line" },
+            "end_line": { "$ref": "#/$defs/line" },
+            "start_column": { "$ref": "#/$defs/column" },
+            "end_column": { "$ref": "#/$defs/column" }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "target": { "const": "FILE_CONTENT" } } },
+              "then": { "properties": { "start_line": { "type": "integer" }, "end_line": { "type": "integer" } } }
+            },
+            {
+              "if": { "properties": { "target": { "const": "FILE_PATH" } } },
+              "then": {
+                "properties": {
+                  "path_redacted": { "const": true },
+                  "start_line": { "const": null }, "end_line": { "const": null },
+                  "start_column": { "const": null }, "end_column": { "const": null }
+                }
+              }
+            }
+          ]
+        },
+        "severity": { "enum": [null, "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] },
+        "confidence": { "enum": [null, "HIGH", "MEDIUM", "LOW"] },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["redacted", "excerpt"],
+          "properties": {
+            "redacted": { "type": "boolean" },
+            "excerpt": { "type": ["string", "null"], "maxLength": 512 }
+          }
+        },
+        "remediation": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["summary", "references"],
+              "properties": {
+                "summary": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                "references": { "type": "array", "maxItems": 8, "items": { "type": "string", "format": "uri", "maxLength": 512 } }
+              }
+            }
+          ]
+        },
+        "status": {
+          "description": "OPEN: detected in this run and not triaged. Lifecycle states (new, existing, resolved, accepted) require comparison and exceptions (M4).",
+          "enum": ["OPEN"]
+        },
+        "occurrences": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "category": { "const": "SECRET" } } },
+          "then": {
+            "properties": {
+              "evidence": {
+                "properties": { "redacted": { "const": true }, "excerpt": { "const": null } }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "scanner": {
+        "name": "gitleaks",
+        "version": "8.30.1",
+        "image": "ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
+      },
+      "context": {
+        "organization_id": "0b6f6a43-5c1e-4c55-9d3b-1f3a7f0d2a11",
+        "project_id": "6c1f2d3e-4b5a-4f60-8e7d-9a0b1c2d3e4f",
+        "scan_id": "3f9a8b7c-6d5e-4f4a-9b3c-2d1e0f9a8b7c",
+        "job_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+        "commit_sha": "4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e"
+      },
+      "input": {
+        "kind": "LOCAL_FIXTURE",
+        "commit_verified": false,
+        "content_sha256": "9f2b5c0d1e4a7b8c3d6e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c",
+        "files_scanned": 3,
+        "bytes_scanned": 214,
+        "paths_redacted": 0,
+        "skipped": { "symlink": 0, "special_file": 0, "hardlink": 0, "oversized": 0, "unsupported_name": 0, "vcs_metadata": 0, "suppression_file": 0 }
+      },
+      "coverage": {
+        "complete": true,
+        "limitations": ["ARCHIVES_NOT_SCANNED", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "RULESET_DEFAULT_ONLY"]
+      },
+      "execution": {
+        "status": "FINDINGS_DETECTED",
+        "exit_code": 41,
+        "raw_report_sha256": "0c8a3e1f5b7d9e2a4c6f8b0d1e3a5c7e9f1b3d5a7c9e1f3b5d7a9c1e3f5b7d9a"
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "id": "5e8f1c2a-3b4d-5e6f-8a9b-0c1d2e3f4a5b",
+          "fingerprint": "7d1e5a9c3b2f4e6d8a0c1b3e5f7a9d2c4e6b8a0d1f3c5e7b9a2d4f6c8e0b1a3d",
+          "scanner": { "name": "gitleaks", "version": "8.30.1" },
+          "rule_id": "github-pat",
+          "category": "SECRET",
+          "description": "Uncovered a GitHub Personal Access Token, potentially leading to unauthorized repository access and sensitive content exposure.",
+          "location": { "target": "FILE_CONTENT", "path": "config/settings.py", "path_redacted": false, "start_line": 3, "end_line": 3, "start_column": 9, "end_column": 48 },
+          "severity": null,
+          "confidence": null,
+          "evidence": { "redacted": true, "excerpt": null },
+          "remediation": null,
+          "status": "OPEN",
+          "occurrences": 1
+        }
+      ]
+    }
+  ]
+}

@@ -34,6 +34,7 @@ Machine-readable contracts of the SentinelPipe control plane API.
 | `messages/v1/processing-receipt.v1.schema.json` | Durable worker receipt committed before acknowledgement |
 | `messages/v1/dead-letter-metadata.v1.schema.json` | `x-sentinel-dead-letter` header attached to dead-lettered messages |
 | `messages/v1/sandbox-output.v1.schema.json` | The only channel from a sandboxed scanner to the worker (stdout): artifacts as data under identifier names, never paths (ADR-0009) |
+| `messages/v1/findings.v1.schema.json` | Normalized, redacted findings of one scanner run, stored as the `findings.json` evidence artifact; coverage and limitations included; never a security decision ([contract](../../docs/api/findings-contract-v1.md), ADR-0010) |
 | `messages/v1/job-result.v1.schema.json` | Result of a leased scan job (worker → `worker.submit_result`), with database-verified evidence references; canonical serialization, at most 16 KiB (ADR-0008) |
 | `messaging/topology.v1.json` | Exchanges, queues, bindings, routing keys and retry settings |
 

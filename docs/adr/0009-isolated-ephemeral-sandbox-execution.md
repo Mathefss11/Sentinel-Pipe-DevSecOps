@@ -6,6 +6,10 @@
 - **Builds on:** [ADR-0007](0007-database-authoritative-execution-leases.md) (leases),
   [ADR-0008](0008-result-integrity-and-evidence.md) (verified evidence)
 - **Threat model:** [execution sandbox](../threat-model/execution-sandbox.md)
+- **Amended by:** [ADR-0010](0010-scanner-adapters-repository-snapshots-and-findings.md).
+  Scanners that need repository input receive one bounded, worker-built archive on stdin
+  (`--interactive`, `SandboxPolicy.max_stdin_bytes`, zero by default). There are still no
+  mounts. The Gitleaks image is added to the image allowlist.
 
 ## Context
 

@@ -342,10 +342,17 @@ class ControlPlane:
             ).fetchone()[0]
         return SeededEvent(message=json.loads(body), body=body.encode("utf-8"))
 
-    def seed_fixture_job(self, lease_seconds: int = 60) -> SeededJob:
-        """A queued scan with one FIXTURE job, as the control plane plans it."""
+    def seed_fixture_job(
+        self,
+        lease_seconds: int = 60,
+        scanner_type: str = "FIXTURE",
+        repository_name: str | None = None,
+    ) -> SeededJob:
+        """A queued scan with one job (FIXTURE by default) for repository
+        ``acme/<repository_name>``, as the control plane plans it."""
         organization_id, project_id, scan_id, job_id = (uuid.uuid4() for _ in range(4))
         suffix = uuid.uuid4().hex[:10]
+        name = repository_name or f"repo-{suffix}"
         now = datetime.now(UTC)
         commit_sha = secrets.token_hex(20)
         with self.admin() as connection, connection.transaction():
@@ -359,7 +366,7 @@ class ControlPlane:
                 " repository_owner, repository_name, default_branch, enabled, version,"
                 " created_at, updated_at)"
                 " VALUES (%s, %s, %s, 'GITHUB', 'acme', %s, 'main', true, 0, %s, %s)",
-                (project_id, organization_id, f"Project {suffix}", f"repo-{suffix}", now, now),
+                (project_id, organization_id, f"Project {suffix}", name, now, now),
             )
             connection.execute(
                 "INSERT INTO scans (id, project_id, commit_sha, branch, trigger_type,"
@@ -371,10 +378,10 @@ class ControlPlane:
             connection.execute(
                 "INSERT INTO scan_jobs (id, scan_id, scanner_type, execution_status,"
                 " attempt_count, version, created_at, updated_at)"
-                " VALUES (%s, %s, 'FIXTURE', 'QUEUED', 0, 0, %s, %s)",
-                (job_id, scan_id, now, now),
+                " VALUES (%s, %s, %s, 'QUEUED', 0, 0, %s, %s)",
+                (job_id, scan_id, scanner_type, now, now),
             )
-        return SeededJob(organization_id, project_id, scan_id, job_id, commit_sha, f"repo-{suffix}")
+        return SeededJob(organization_id, project_id, scan_id, job_id, commit_sha, name)
 
     def job_state(self, job_id: uuid.UUID) -> dict[str, Any]:
         with self.admin() as connection:

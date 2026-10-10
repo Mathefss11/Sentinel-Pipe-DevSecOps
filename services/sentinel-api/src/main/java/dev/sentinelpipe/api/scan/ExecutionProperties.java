@@ -24,8 +24,12 @@ public class ExecutionProperties {
 	/** Profiles under which the execution fixture is refused. */
 	static final List<String> PRODUCTION_PROFILES = List.of("prod", "production");
 
-	/** Scanners that can be executed by this version (only the harmless fixture). */
-	static final Set<ScannerType> EXECUTABLE_SCANNERS = EnumSet.of(ScannerType.FIXTURE);
+	/**
+	 * Scanners that can be executed by this version: the harmless fixture and Gitleaks
+	 * (ADR-0010). Gitleaks workers scan only local synthetic repositories so far, so it is
+	 * not plannable automatically under a production profile.
+	 */
+	static final Set<ScannerType> EXECUTABLE_SCANNERS = EnumSet.of(ScannerType.FIXTURE, ScannerType.GITLEAKS);
 
 	/**
 	 * Allows the harmless FIXTURE scanner type to be planned. For development, CI and
@@ -177,7 +181,7 @@ public class ExecutionProperties {
 		for (ScannerType scanner : this.plannedScanners) {
 			if (!EXECUTABLE_SCANNERS.contains(scanner)) {
 				throw new IllegalStateException("sentinel.execution.planned-scanners: " + scanner
-						+ " is not executable by this version (only FIXTURE is)");
+						+ " is not executable by this version (only FIXTURE and GITLEAKS are)");
 			}
 			if (!isPlannable(scanner)) {
 				throw new IllegalStateException(
@@ -187,11 +191,17 @@ public class ExecutionProperties {
 		if (this.plannedScanners.size() != this.plannedScanners.stream().distinct().count()) {
 			throw new IllegalStateException("sentinel.execution.planned-scanners must not contain duplicates");
 		}
-		if (this.fixtureEnabled && Arrays.stream(activeProfiles)
+		boolean production = Arrays.stream(activeProfiles)
 			.map((profile) -> profile.toLowerCase(Locale.ROOT))
-			.anyMatch(PRODUCTION_PROFILES::contains)) {
+			.anyMatch(PRODUCTION_PROFILES::contains);
+		if (this.fixtureEnabled && production) {
 			throw new IllegalStateException(
 					"sentinel.execution.fixture-enabled=true is not permitted with a production profile");
+		}
+		if (production && this.plannedScanners.contains(ScannerType.GITLEAKS)) {
+			// Workers refuse Gitleaks in production: its only repository input is local fixtures.
+			throw new IllegalStateException("sentinel.execution.planned-scanners: GITLEAKS is not permitted with a "
+					+ "production profile (repository input is limited to local fixtures in this version)");
 		}
 		if (this.supervisor.interval == null || this.supervisor.interval.compareTo(Duration.ofSeconds(1)) < 0
 				|| this.supervisor.interval.compareTo(this.leaseDuration) > 0) {

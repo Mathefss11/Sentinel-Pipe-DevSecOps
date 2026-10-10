@@ -56,6 +56,27 @@ class ExecutionPropertiesTests {
 	}
 
 	@Test
+	void gitleaksCanBePlannedAutomaticallyOutsideProduction() {
+		ExecutionProperties properties = new ExecutionProperties();
+		properties.setPlannedScanners(List.of(ScannerType.GITLEAKS));
+
+		assertThatCode(() -> properties.validate(new String[] { "local" })).doesNotThrowAnyException();
+		assertThat(properties.isPlannable(ScannerType.GITLEAKS)).isTrue();
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = { "prod", "production", "PROD" })
+	void gitleaksIsNotPlannedAutomaticallyUnderProductionProfiles(String profile) {
+		// Workers scan only local synthetic repositories with Gitleaks in this version.
+		ExecutionProperties properties = new ExecutionProperties();
+		properties.setPlannedScanners(List.of(ScannerType.GITLEAKS));
+
+		assertThatThrownBy(() -> properties.validate(new String[] { profile }))
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("GITLEAKS is not permitted with a production profile");
+	}
+
+	@Test
 	void plannedFixtureRequiresTheFixtureToBeEnabled() {
 		ExecutionProperties properties = new ExecutionProperties();
 		properties.setPlannedScanners(new ArrayList<>(List.of(ScannerType.FIXTURE)));

@@ -385,8 +385,10 @@ load `.env` into the session (as for the API), then:
 .\.venv\Scripts\sentinel-worker.exe consume --idle-timeout 30
 ```
 
-To execute claimed jobs (development and CI only: only the harmless `FIXTURE` executor
-exists), see the [execution runbook](docs/runbooks/execution.md):
+To execute claimed jobs (development and CI only), see the
+[execution runbook](docs/runbooks/execution.md). The harmless `FIXTURE` executor and the
+`GITLEAKS` scanner on local synthetic repositories are available
+([Gitleaks runbook](docs/runbooks/gitleaks.md)):
 
 ```powershell
 $env:SENTINEL_WORKER_FIXTURE_ENABLED = "true"
@@ -405,6 +407,7 @@ $env:SENTINEL_WORKER_FIXTURE_ENABLED = "true"
 | `SENTINEL_WORKER_PREFETCH` | Unacknowledged messages in flight, 1–50 (default 1) |
 | `SENTINEL_WORKER_FIXTURE_ENABLED` / `_SECONDS` / `_MODE` | `execute`: enable the harmless FIXTURE executor (refused in `production`), its duration and test mode |
 | `SENTINEL_WORKER_FIXTURE_EXECUTOR`, `SENTINEL_WORKER_SANDBOX_*`, `SENTINEL_WORKER_DOCKER_CLI` | Sandbox (default) or inline execution, sandbox limits and runtime ([execution runbook](docs/runbooks/execution.md#5-sandboxes)) |
+| `SENTINEL_WORKER_GITLEAKS_ENABLED` / `SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR` | `execute`: run `GITLEAKS` jobs against synthetic repositories at `<dir>/<owner>/<name>` (refused in `production`; [runbook](docs/runbooks/gitleaks.md)) |
 | `SENTINEL_WORKER_EXECUTION_POLL_SECONDS` | `execute`: delay between claim attempts when idle (default 5) |
 
 Operator recovery commands (`outbox-summary`, `outbox-list-failed`,
@@ -464,7 +467,7 @@ Details: [ADR-0004](docs/adr/0004-transactional-outbox-and-at-least-once-messagi
 | Worker formatting | `.\.venv\Scripts\ruff.exe format --check .` | — |
 | Worker unit tests | `.\.venv\Scripts\python.exe -m pytest -m "not integration"` | — |
 | Worker tests incl. RabbitMQ and PostgreSQL integration | `.\.venv\Scripts\python.exe -m pytest` | Docker (Testcontainers); sandbox tests also need the pinned sandbox image (skipped otherwise) |
-| Sandbox isolation only | `.\.venv\Scripts\python.exe -m pytest -m sandbox` and `sentinel-worker sandbox-check` | Docker, sandbox image |
+| Sandbox isolation and real Gitleaks scans | `.\.venv\Scripts\python.exe -m pytest -m sandbox`, `sentinel-worker sandbox-check` and `sentinel-worker sandbox-check --profile gitleaks` | Docker, the pinned fixture and Gitleaks images ([runbook](docs/runbooks/gitleaks.md#1-pinned-image)) |
 | End to end: API → outbox → RabbitMQ → real worker | `.\mvnw.cmd verify -Pe2e "-Dsentinel.e2e.python=..\sentinel-worker\.venv\Scripts\python.exe"` (`services/sentinel-api`) | Docker, worker installed |
 | Compose configuration | `docker compose --env-file .env.example config --quiet` (repository root) | Docker |
 | OPA authorization policy | `docker run --rm -v "${PWD}\infrastructure\docker\opa:/policies:ro" openpolicyagent/opa:1.21.1 test /policies -v` | Docker |
@@ -523,18 +526,31 @@ the repository. The tests verify that:
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on pushes to `main`, on pull requests, and manually. It has
-four jobs (the worker job runs once per Python version):
+five jobs (the worker job runs once per Python version):
 
 - **sentinel-api:** `mvnw clean verify` on JDK 21, including the Testcontainers integration tests.
 - **sentinel-worker:** Ruff lint, Ruff format check and Pytest on Python 3.12 and 3.14,
   including RabbitMQ and PostgreSQL integration tests via Testcontainers (pinned images,
   pre-pulled; schema from the real Flyway migrations, identities from the real
   provisioning scripts).
+- **Sandbox isolation:** `sandbox-check` for the fixture and Gitleaks profiles, then every
+  sandbox-marked test with real containers on Linux:
+  - isolation, limits, cancellation and crash reaping;
+  - real Gitleaks scans of synthetic repositories, including symlink escapes and
+    suppression attempts.
+
+  It fails, rather than skips, when the runtime or a pinned image is missing, and checks
+  that no sandbox is left behind.
 - **End-to-end:** an authenticated scan request travels through the outbox, publisher
   confirms and RabbitMQ to the real Python worker, which records its receipt in
-  PostgreSQL. The suite also covers a publisher crash after the broker confirm, a
-  forged message, and an audited dead-letter replay through the operator CLI (`-Pe2e`;
-  the profile fails if no E2E test runs).
+  PostgreSQL. The suite also covers:
+  - a publisher crash after the broker confirm;
+  - a forged message;
+  - an audited dead-letter replay through the operator CLI;
+  - sandboxed execution, cancellation and crash recovery;
+  - Gitleaks scans whose redacted findings are verified evidence, never `PASS`.
+
+  It runs with `-Pe2e`; the profile fails if no E2E test runs.
 - **Infrastructure:** validates `compose.yaml`, checks and tests the OPA authorization
   policy, starts the stack and waits for all health checks, provisions the runtime
   identities and verifies the exact broker permissions, then tears it down.
@@ -638,6 +654,21 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   [security-readiness report](docs/security/m3-phase1-security-readiness.md) (verdict: ready
   with conditions)
 
+## Milestone 3, Phase 2 progress
+
+- [x] Slice 1: Gitleaks secret detection (ADR-0010):
+  - scanner adapter architecture;
+  - repository snapshots streamed to the sandbox on stdin (no mounts; links, hard links
+    and special files never followed);
+  - pinned Gitleaks 8.30.1 with repository-controlled suppression disabled;
+  - explicit exit-code semantics and input verification (no false clean);
+  - `findings.v1` contract with redacted, deduplicated, deterministic findings;
+  - real-container, integration and end-to-end tests;
+  - runbook and threat model.
+
+  Scans local synthetic repositories only (development and CI).
+- [ ] Semgrep and Trivy adapters; verified commit snapshots (remote repositories)
+
 ## Architecture decisions
 
 - [ADR-0001: Modular monolith control plane](docs/adr/0001-modular-monolith-control-plane.md)
@@ -650,6 +681,8 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 - [ADR-0008: Result integrity, evidence storage and execution observability](docs/adr/0008-result-integrity-and-evidence.md)
 - [ADR-0009: Isolated, ephemeral sandbox execution](docs/adr/0009-isolated-ephemeral-sandbox-execution.md)
   ([threat model](docs/threat-model/execution-sandbox.md))
+- [ADR-0010: Scanner adapters, repository snapshots and normalized findings](docs/adr/0010-scanner-adapters-repository-snapshots-and-findings.md)
+  ([threat model](docs/threat-model/gitleaks-scanner.md), [findings contract](docs/api/findings-contract-v1.md))
 
 ## Current security limitations
 
@@ -675,9 +708,20 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   should migrate in a separate step.
 - `triggerType` and `branch` are supplied by the caller and not yet verified against
   GitHub events or Actions OIDC claims. There is no rate limiting.
-- No real scanner runs (only the harmless `FIXTURE` executor) and there is no policy
-  engine, so no scan can reach `PASS` or `FAIL`; completed scans are `INCOMPLETE`.
-  Untrusted repository content is not fetched or executed anywhere yet.
+- Gitleaks is the only real scanner. It scans **local synthetic repositories** only: no
+  repository is fetched, and the scanned content is not verified to be the commit
+  (`commit_verified: false`). There is no policy engine, so no scan can reach `PASS` or
+  `FAIL`; completed scans are `INCOMPLETE`, with or without findings. Repository code is
+  never executed.
+- Gitleaks coverage is bounded:
+  - no Git history and no archives;
+  - only the upstream default rules, with path allowlists removed. The line-based
+    allowlists of two generic rules remain;
+  - links, hard links, oversized files and unsupported names are skipped.
+
+  Every findings document records these limitations. Secrets in file names are detected
+  and redacted on a best-effort basis
+  ([security review](docs/security/m3-phase2-slice1-security-review.md)).
 - The sandbox uses Docker with the default runc runtime, which shares the host kernel. It
   enforces namespaces, cgroup limits, seccomp, no capabilities and no network, but it is
   not a sufficient boundary for hostile code that attacks the kernel. Trust policy:
@@ -699,7 +743,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 |---|---|
 | M1 — Foundation | Complete |
 | **M2 — Domain & Contracts** | Phases 1, 2A, 2B and 2C complete (see checklists) |
-| **M3 — Scanners** | Phase 1 in progress: database privilege separation and the execution lifecycle (leases, supervisor, cancellation) done; worker results, sandbox and scanners next |
+| **M3 — Scanners** | Phase 1 complete (privilege separation, leases, result integrity, sandbox); Phase 2 in progress: Gitleaks done, Semgrep and Trivy next |
 | M4 — Security Gate & Remediation | OPA policies, coverage, exceptions, decisions, remediation reports |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |
 | M6 — Advanced Security | Checkov, Syft/SBOM, ZAP, attestation, isolated staging |

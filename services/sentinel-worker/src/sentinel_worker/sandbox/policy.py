@@ -10,7 +10,11 @@ the host. The container gets:
   default seccomp profile, an init process reaping children;
 * memory (swap disabled), CPU, PID, open-file and core-dump limits;
 * **no** volumes, bind mounts, Docker socket, devices, host namespaces, environment
-  variables from the host, credentials or registry access (``--pull never``).
+  variables from the host, credentials or registry access (``--pull never``);
+* optionally, for scanners that need repository input, an **stdin** pipe
+  (``--interactive``) carrying a worker-built snapshot archive, bounded by
+  :attr:`SandboxPolicy.max_stdin_bytes` (zero, i.e. no stdin, by default). The input is
+  data written into the sandbox's own tmpfs; no host path is ever mounted.
 
 Whether these controls are a strong boundary depends on the runtime: with the default
 ``runc`` they share the host kernel (see ADR-0009 and docs/threat-model).
@@ -33,7 +37,11 @@ from enum import StrEnum
 #: Images the worker may start, pinned by digest. alpine:3.22 (BusyBox userland), used
 #: only by the harmless FIXTURE scanner. Must match .github/workflows/ci.yml.
 FIXTURE_IMAGE = "alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8"
-ALLOWED_IMAGES = frozenset({FIXTURE_IMAGE})
+#: Gitleaks v8.30.1, official image (Alpine, BusyBox userland), pinned by its multi-platform
+#: index digest. The same digest is published on ghcr.io and docker.io. Reviewed for
+#: M3 Phase 2 (docs/runbooks/gitleaks.md). Must match .github/workflows/ci.yml.
+GITLEAKS_IMAGE = "ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"  # noqa: E501
+ALLOWED_IMAGES = frozenset({FIXTURE_IMAGE, GITLEAKS_IMAGE})
 
 #: Executables a sandbox may start (inside the image).
 ALLOWED_COMMANDS = frozenset({"/bin/sh"})
@@ -78,6 +86,8 @@ class SandboxPolicy:
     timeout_seconds: float = 300.0
     max_stdout_bytes: int = 2 * 1024 * 1024
     max_stderr_bytes: int = 64 * 1024
+    #: Largest input accepted on stdin; 0 means the sandbox gets no stdin at all.
+    max_stdin_bytes: int = 0
     open_files: int = 256
     runtime: str | None = None
     #: Extra time after the timeout before an orphaned sandbox counts as expired.
@@ -101,6 +111,8 @@ class SandboxPolicy:
             raise ValueError("stdout limit must be between 1 KiB and 16 MiB")
         if not 1024 <= self.max_stderr_bytes <= 1024 * 1024:
             raise ValueError("stderr limit must be between 1 KiB and 1 MiB")
+        if not 0 <= self.max_stdin_bytes <= 64 * 1024 * 1024:
+            raise ValueError("stdin limit must be between 0 and 64 MiB")
         if not 16 <= self.open_files <= 65536:
             raise ValueError("open file limit must be between 16 and 65536")
         if self.runtime is not None and self.runtime not in ALLOWED_RUNTIMES:
@@ -124,8 +136,13 @@ def run_arguments(
     argv: Sequence[str],
     labels: Mapping[str, str],
     expires_at: int,
+    interactive: bool = False,
 ) -> list[str]:
-    """The ``docker run`` arguments (without the executable) for one sandbox."""
+    """The ``docker run`` arguments (without the executable) for one sandbox.
+
+    ``interactive`` attaches stdin (input data only); the policy must allow stdin."""
+    if interactive and policy.max_stdin_bytes <= 0:
+        raise ValueError("this sandbox policy accepts no stdin")
     if not SANDBOX_NAME.match(name):
         raise ValueError("invalid sandbox name")
     if not argv or argv[0] not in ALLOWED_COMMANDS:
@@ -162,6 +179,8 @@ def run_arguments(
         if key != JOB_LABEL or not _LABEL_VALUE.match(value):
             raise ValueError("invalid sandbox label")
         arguments += ["--label", f"{key}={value}"]
+    if interactive:
+        arguments += ["--interactive"]
     if policy.runtime is not None:
         arguments += ["--runtime", policy.runtime]
     arguments += ["--entrypoint", argv[0], policy.image, *argv[1:]]

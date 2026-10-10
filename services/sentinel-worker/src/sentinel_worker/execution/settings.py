@@ -6,6 +6,11 @@ receipt store); see :func:`sentinel_worker.messaging.settings.worker_database_se
 The FIXTURE scanner runs in a Docker sandbox by default (``SENTINEL_WORKER_FIXTURE_EXECUTOR
 =sandbox``); ``inline`` runs the in-process fixture without any container. Sandbox
 limits are bounded here, and the image and command are fixed in code (ADR-0009).
+
+The GITLEAKS scanner (``SENTINEL_WORKER_GITLEAKS_ENABLED=true``, ADR-0010) scans
+synthetic repositories under ``SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR``. That local
+fixture source is the only repository input in this version, so Gitleaks is refused in
+production until a verified commit-snapshot source exists.
 """
 
 from __future__ import annotations
@@ -32,6 +37,8 @@ SANDBOX_MEMORY_VAR = "SENTINEL_WORKER_SANDBOX_MEMORY_MB"
 SANDBOX_CPUS_VAR = "SENTINEL_WORKER_SANDBOX_CPUS"
 SANDBOX_PIDS_VAR = "SENTINEL_WORKER_SANDBOX_PIDS"
 SANDBOX_RUNTIME_VAR = "SENTINEL_WORKER_SANDBOX_RUNTIME"
+GITLEAKS_ENABLED_VAR = "SENTINEL_WORKER_GITLEAKS_ENABLED"
+REPOSITORY_FIXTURES_DIR_VAR = "SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR"
 EXECUTORS = ("sandbox", "inline")
 
 
@@ -45,23 +52,29 @@ class ExecutionSettings:
     fixture_mode: FixtureMode = FixtureMode.SUCCESS
     docker_cli: str | None = None
     sandbox_policy: SandboxPolicy | None = None
+    gitleaks_enabled: bool = False
+    repository_fixtures_dir: str | None = None
+    gitleaks_policy: SandboxPolicy | None = None
 
     @classmethod
     def from_env(
         cls, environment: Environment, environ: Mapping[str, str] | None = None
     ) -> ExecutionSettings:
         env = os.environ if environ is None else environ
-        fixture = env.get(FIXTURE_ENABLED_VAR, "false").strip().lower()
-        if fixture not in ("true", "false"):
-            raise ConfigurationError(f"{FIXTURE_ENABLED_VAR} must be true or false")
-        fixture_enabled = fixture == "true"
+        fixture_enabled = _flag(env, FIXTURE_ENABLED_VAR)
         if fixture_enabled and environment is Environment.PRODUCTION:
             raise ConfigurationError(f"{FIXTURE_ENABLED_VAR}=true is not permitted in production")
-        if not fixture_enabled:
-            # No real scanner is executable in this version.
+        gitleaks_enabled = _flag(env, GITLEAKS_ENABLED_VAR)
+        if gitleaks_enabled and environment is Environment.PRODUCTION:
+            # The only repository input is local fixtures (no verified commit snapshots yet).
             raise ConfigurationError(
-                f"no executable scanner is enabled; set {FIXTURE_ENABLED_VAR}=true "
-                "(development and CI only)"
+                f"{GITLEAKS_ENABLED_VAR}=true is not permitted in production: repository "
+                "input is limited to local fixtures in this version"
+            )
+        if not fixture_enabled and not gitleaks_enabled:
+            raise ConfigurationError(
+                f"no executable scanner is enabled; set {FIXTURE_ENABLED_VAR}=true or "
+                f"{GITLEAKS_ENABLED_VAR}=true (development and CI only)"
             )
         executor = env.get(FIXTURE_EXECUTOR_VAR, "sandbox").strip().lower() or "sandbox"
         if executor not in EXECUTORS:
@@ -78,23 +91,31 @@ class ExecutionSettings:
             raise ConfigurationError(f"{FIXTURE_MODE_VAR} other than success requires the sandbox")
         docker_cli = None
         policy = None
-        if executor == "sandbox":
+        gitleaks_policy = None
+        fixtures_dir = None
+        runtime = env.get(SANDBOX_RUNTIME_VAR, "").strip() or None
+        if runtime is not None and runtime not in ALLOWED_RUNTIMES:
+            allowed = ", ".join(sorted(ALLOWED_RUNTIMES))
+            raise ConfigurationError(f"{SANDBOX_RUNTIME_VAR} must be empty or one of: {allowed}")
+        timeout = _bounded(env, SANDBOX_TIMEOUT_VAR, 300.0, 1.0, 900.0)
+        cpus = _bounded(env, SANDBOX_CPUS_VAR, 1.0, 0.1, 4.0)
+        if fixture_enabled and executor == "sandbox":
             docker_cli = _docker_cli(env)
-            runtime = env.get(SANDBOX_RUNTIME_VAR, "").strip() or None
-            if runtime is not None and runtime not in ALLOWED_RUNTIMES:
-                allowed = ", ".join(sorted(ALLOWED_RUNTIMES))
-                raise ConfigurationError(
-                    f"{SANDBOX_RUNTIME_VAR} must be empty or one of: {allowed}"
-                )
             policy = SandboxPolicy(
-                timeout_seconds=_bounded(env, SANDBOX_TIMEOUT_VAR, 300.0, 1.0, 900.0),
+                timeout_seconds=timeout,
                 memory_bytes=int(_bounded(env, SANDBOX_MEMORY_VAR, 256.0, 16.0, 4096.0))
                 * 1024
                 * 1024,
-                cpus=_bounded(env, SANDBOX_CPUS_VAR, 1.0, 0.1, 4.0),
+                cpus=cpus,
                 pids=int(_bounded(env, SANDBOX_PIDS_VAR, 64.0, 16.0, 1024.0)),
                 runtime=runtime,
             )
+        if gitleaks_enabled:
+            from sentinel_worker.scanners.gitleaks import GitleaksAdapter
+
+            docker_cli = _docker_cli(env)
+            fixtures_dir = _fixtures_dir(env)
+            gitleaks_policy = GitleaksAdapter().policy(timeout, cpus, runtime)
         return cls(
             database=worker_database_settings(environment, env),
             poll_interval_seconds=_bounded(env, POLL_INTERVAL_VAR, 5.0, 0.1, 60.0),
@@ -104,7 +125,28 @@ class ExecutionSettings:
             fixture_mode=mode,
             docker_cli=docker_cli,
             sandbox_policy=policy,
+            gitleaks_enabled=gitleaks_enabled,
+            repository_fixtures_dir=fixtures_dir,
+            gitleaks_policy=gitleaks_policy,
         )
+
+
+def _flag(env: Mapping[str, str], name: str) -> bool:
+    value = env.get(name, "false").strip().lower()
+    if value not in ("true", "false"):
+        raise ConfigurationError(f"{name} must be true or false")
+    return value == "true"
+
+
+def _fixtures_dir(env: Mapping[str, str]) -> str:
+    """The synthetic repository root: an absolute, existing directory that is not a link
+    (re-checked by :class:`~sentinel_worker.repository.snapshot.LocalFixtureRepositorySource`)."""
+    path = env.get(REPOSITORY_FIXTURES_DIR_VAR, "").strip()
+    if not path or not os.path.isabs(path) or not os.path.isdir(path) or os.path.islink(path):
+        raise ConfigurationError(
+            f"{REPOSITORY_FIXTURES_DIR_VAR} must be the absolute path of an existing directory"
+        )
+    return path
 
 
 def _docker_cli(env: Mapping[str, str]) -> str:

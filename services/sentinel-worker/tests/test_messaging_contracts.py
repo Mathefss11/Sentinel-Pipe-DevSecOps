@@ -13,6 +13,7 @@ SHARED_LOCATIONS = {
     contracts.DEAD_LETTER_METADATA_SCHEMA: CONTRACTS_DIR / "messages" / "v1",
     contracts.JOB_RESULT_SCHEMA: CONTRACTS_DIR / "messages" / "v1",
     contracts.SANDBOX_OUTPUT_SCHEMA: CONTRACTS_DIR / "messages" / "v1",
+    contracts.FINDINGS_SCHEMA: CONTRACTS_DIR / "messages" / "v1",
     contracts.TOPOLOGY: CONTRACTS_DIR / "messaging",
 }
 
