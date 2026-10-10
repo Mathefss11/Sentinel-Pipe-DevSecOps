@@ -21,6 +21,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -28,6 +29,9 @@ import tools.jackson.databind.JsonNode;
 
 /** Scan creation and outbox event creation are one atomic unit. */
 class TransactionalOutboxIntegrationTests extends AbstractDomainApiIntegrationTest {
+
+	@Autowired
+	private JdbcTemplate applicationJdbc;
 
 	@Autowired
 	private ScanService scanService;
@@ -170,8 +174,9 @@ class TransactionalOutboxIntegrationTests extends AbstractDomainApiIntegrationTe
 				.details()
 				.scan()
 				.getId();
-			// Both rows exist inside the transaction ...
-			assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM outbox_events WHERE aggregate_id = ?",
+			// Both rows exist inside the transaction (read through the application's own,
+			// transaction-bound connection; the fixture connection cannot see them) ...
+			assertThat(this.applicationJdbc.queryForObject("SELECT count(*) FROM outbox_events WHERE aggregate_id = ?",
 					Integer.class, id))
 				.isEqualTo(1);
 			status.setRollbackOnly();

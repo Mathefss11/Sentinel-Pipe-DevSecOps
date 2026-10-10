@@ -2,7 +2,7 @@ openapi: 3.1.0
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 info:
   title: SentinelPipe Control Plane API
-  version: 1.1.0-m2.2a
+  version: 1.2.0-m3.1
   summary: Organizations, memberships, projects and security scan requests.
   description: |
     Domain REST API of the SentinelPipe control plane (Milestone 2, Phase 2A).
@@ -25,6 +25,7 @@ info:
     |---|---|---|---|---|
     | View organization, projects, scans | yes | yes | yes | yes |
     | Request scan | yes | yes | yes | no |
+    | Cancel scan | yes | yes | yes | no |
     | Register project | yes | yes | no | no |
     | List members | yes | yes | no | no |
     | Grant / change / revoke OWNER, ADMIN | yes | no | no | no |
@@ -41,8 +42,13 @@ info:
     - Unknown request properties are rejected with `400`.
     - Errors use RFC 9457 Problem Details (`application/problem+json`).
     - Collections use zero-based offset pagination (`page`, `size` <= 100).
-    - Scan lifecycle transitions are not exposed; they are reserved for trusted
-      internal components in later phases.
+    - Execution transitions (claiming, heartbeats, results, recovery, evaluation)
+      are not exposed over HTTP: they belong to authenticated workers and the
+      control-plane supervisor, through the database execution protocol
+      (ADR-0007). The only user-facing transition is cancellation.
+    - `executionStatus` and `securityDecision` are independent. Completing
+      execution never implies `PASS`; without a policy evaluation a completed
+      scan is `INCOMPLETE`, and `decisionReason` says why.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development (loopback only, `local` profile)
@@ -302,8 +308,10 @@ paths:
                 triggerType: PULL_REQUEST
                 executionStatus: QUEUED
                 securityDecision: PENDING
+                decisionReason: null
                 requestedAt: '2026-10-09T12:02:00.5Z'
                 startedAt: null
+                deadlineAt: null
                 completedAt: null
                 jobs: []
         '400':
@@ -347,6 +355,71 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/projects/{projectId}/scans/{scanId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: scanId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags: [Scans]
+      operationId: cancelScan
+      summary: Cancel a scan
+      description: |
+        Cancels a scan that has not finished (MEMBER or above). The scan becomes
+        `CANCELLED` with decision `INCOMPLETE` (`decisionReason: CANCELLED_BY_USER`)
+        and its unfinished jobs are cancelled. A worker executing one of them is
+        told on its next heartbeat (within 15 seconds by default) and its result is
+        rejected. The cancellation is audited with the caller's identity.
+
+        Idempotent: cancelling a cancelled scan returns it unchanged. The scan must
+        belong to the project in the path; otherwise, and for non-members, `404`.
+        A `COMPLETED` or `FAILED` scan cannot be cancelled (`409`,
+        `code: scan-not-cancellable`). No request body.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The scan, now cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/scan.schema.json'
+              example:
+                id: 9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d
+                projectId: 6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f
+                commitSha: 4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e
+                branch: feature/login
+                triggerType: PULL_REQUEST
+                executionStatus: CANCELLED
+                securityDecision: INCOMPLETE
+                decisionReason: CANCELLED_BY_USER
+                requestedAt: '2026-10-09T12:02:00.5Z'
+                startedAt: '2026-10-09T12:02:05Z'
+                deadlineAt: '2026-10-09T12:17:05Z'
+                completedAt: '2026-10-09T12:03:10Z'
+                jobs:
+                  - id: 3c5e7a9b-0d1f-4e2a-9b3c-5d7e9f1a3b5c
+                    scanId: 9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d
+                    scannerType: FIXTURE
+                    executionStatus: CANCELLED
+                    attemptCount: 1
+                    failureReason: null
+                    createdAt: '2026-10-09T12:02:01Z'
+                    startedAt: '2026-10-09T12:02:05Z'
+                    completedAt: '2026-10-09T12:03:10Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
   /api/v1/scans/{scanId}:
     parameters:
       - name: scanId
@@ -378,8 +451,10 @@ paths:
                 triggerType: PULL_REQUEST
                 executionStatus: COMPLETED
                 securityDecision: FAIL
+                decisionReason: POLICY_EVALUATED
                 requestedAt: '2026-10-09T12:02:00.5Z'
                 startedAt: '2026-10-09T12:02:05Z'
+                deadlineAt: '2026-10-09T12:17:05Z'
                 completedAt: '2026-10-09T12:04:30Z'
                 jobs:
                   - id: 3c5e7a9b-0d1f-4e2a-9b3c-5d7e9f1a3b5c
@@ -387,6 +462,7 @@ paths:
                     scannerType: SEMGREP
                     executionStatus: COMPLETED
                     attemptCount: 1
+                    failureReason: null
                     createdAt: '2026-10-09T12:02:01Z'
                     startedAt: '2026-10-09T12:02:06Z'
                     completedAt: '2026-10-09T12:04:00Z'

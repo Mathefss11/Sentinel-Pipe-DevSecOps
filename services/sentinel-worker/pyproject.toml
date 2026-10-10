@@ -46,6 +46,7 @@ testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
     "integration: requires Docker (real RabbitMQ and/or PostgreSQL through Testcontainers)",
+    "sandbox: runs real sandbox containers (requires Docker and the pinned fixture image)",
 ]
 xfail_strict = true
 

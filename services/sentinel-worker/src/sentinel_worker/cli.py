@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import signal
 import sys
 from collections.abc import Sequence
 from typing import Any
@@ -43,6 +45,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Stop after this many seconds without a message.",
     )
+    execute = commands.add_parser(
+        "execute",
+        help="Claim scan jobs with leases, execute them and report outcomes (ADR-0007).",
+    )
+    execute.add_argument("--max-jobs", type=int, default=None, help="Stop after this many jobs.")
+    execute.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=None,
+        help="Stop after this many seconds without a claimable job.",
+    )
 
     # Operator recovery tools (operator credentials; see docs/runbooks/messaging.md).
     commands.add_parser("outbox-summary", help="[operator] Outbox counts and oldest pending age.")
@@ -59,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--event-id", action="append", default=None, help="Specific event id (repeatable)."
     )
     requeue.add_argument("--limit", type=int, default=10, help="Oldest FAILED events (1-100).")
+    commands.add_parser(
+        "sandbox-check",
+        help="Verify the sandbox runtime, image and isolation controls; prints a JSON report.",
+    )
     commands.add_parser("dlq-depth", help="[operator] Ready messages in the dead-letter queue.")
     replay = commands.add_parser(
         "dlq-replay",
@@ -130,6 +147,101 @@ def _consume(args: argparse.Namespace) -> int:
     finally:
         store.close()
     return EXIT_OK
+
+
+def _execute(args: argparse.Namespace) -> int:
+    # Imported lazily so `self-check` works without database libraries being importable.
+    from sentinel_worker.execution.fixture import FixtureExecutor
+    from sentinel_worker.execution.leases import JobLeaseClient
+    from sentinel_worker.execution.runner import ExecutionLoop, JobExecutor
+    from sentinel_worker.execution.sandboxed import SandboxedFixtureExecutor
+    from sentinel_worker.execution.settings import ExecutionSettings
+    from sentinel_worker.messaging.consumer import new_worker_id
+    from sentinel_worker.metrics import ExecutionMetrics, MetricsSettings, serve
+    from sentinel_worker.sandbox.docker import DockerCli, DockerSandbox, SandboxError
+
+    try:
+        worker_settings = WorkerSettings.from_env()
+        settings = ExecutionSettings.from_env(worker_settings.environment)
+        metrics_settings = MetricsSettings.from_env()
+    except ConfigurationError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return EXIT_CONFIGURATION
+    logging.basicConfig(
+        level=worker_settings.log_level, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    executor: JobExecutor
+    if settings.fixture_executor == "sandbox":
+        if settings.docker_cli is None or settings.sandbox_policy is None:  # pragma: no cover
+            raise AssertionError("sandbox settings missing")
+        try:
+            sandbox = DockerSandbox(DockerCli(settings.docker_cli), settings.sandbox_policy)
+            sandbox.check()
+            # Sandboxes left behind by a crashed worker are removed once they expire.
+            sandbox.reap_expired()
+        except SandboxError as exc:
+            print(f"unavailable: {exc}", file=sys.stderr)
+            return EXIT_UNAVAILABLE
+        executor = SandboxedFixtureExecutor(
+            sandbox, settings.fixture_mode, settings.fixture_seconds
+        )
+    else:
+        executor = FixtureExecutor(settings.fixture_seconds)
+    worker_id = new_worker_id()
+    client = JobLeaseClient(settings.database, worker_id)
+    heartbeats = JobLeaseClient(settings.database, f"{worker_id[:50]}-heartbeat")
+    metrics = ExecutionMetrics()
+    serve(metrics, metrics_settings)
+    loop = ExecutionLoop(
+        client,
+        heartbeats,
+        executor,
+        poll_interval=settings.poll_interval_seconds,
+        metrics=metrics,
+    )
+    previous = {
+        signum: signal.signal(signum, lambda *_: loop.request_shutdown())
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        summary = loop.run(max_jobs=args.max_jobs, idle_timeout=args.idle_timeout)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        client.close()
+        heartbeats.close()
+    print(json.dumps(summary.to_dict()))
+    return EXIT_OK
+
+
+def _sandbox_check() -> int:
+    """Runs the isolation probe in a real sandbox and verifies every control."""
+    import threading
+
+    from sentinel_worker.execution.settings import _docker_cli
+    from sentinel_worker.sandbox.docker import DockerCli, DockerSandbox, SandboxError, SandboxStatus
+    from sentinel_worker.sandbox.isolation import probe_command, verify
+    from sentinel_worker.sandbox.policy import SandboxPolicy
+
+    try:
+        sandbox = DockerSandbox(
+            DockerCli(_docker_cli(os.environ)), SandboxPolicy(timeout_seconds=60)
+        )
+        sandbox.check()
+        run = sandbox.run(probe_command(), threading.Event())
+    except (ConfigurationError, SandboxError) as exc:
+        print(json.dumps({"healthy": False, "error": str(exc)}, indent=2))
+        return EXIT_UNAVAILABLE
+    report = (
+        verify(run, sandbox.policy)
+        if run.status is SandboxStatus.EXITED
+        else {
+            "healthy": False,
+            "error": f"probe ended with {run.status.value}",
+        }
+    )
+    print(json.dumps(report, indent=2))
+    return EXIT_OK if report["healthy"] else EXIT_UNHEALTHY
 
 
 def _operator(args: argparse.Namespace) -> int:
@@ -224,5 +336,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "consume":
         return _consume(args)
+
+    if args.command == "execute":
+        return _execute(args)
+
+    if args.command == "sandbox-check":
+        return _sandbox_check()
 
     return _operator(args)

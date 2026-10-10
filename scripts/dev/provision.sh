@@ -1,7 +1,8 @@
 #!/bin/sh
 # Provisions the least-privileged runtime identities in the local Compose stack:
 #   RabbitMQ  topology (definitions.json) + publisher, worker and operator users
-#   PostgreSQL worker and operator login roles
+#   PostgreSQL group roles, ownership (upgrade path) and the migrator, API, worker and
+#              operator login roles
 #
 # Usage (repository root, stack running):  sh scripts/dev/provision.sh [env-file]
 # Values come from the environment, or from the env file (default .env). Secrets are
@@ -24,6 +25,8 @@ docker compose --env-file "$ENV_FILE" exec -T \
     rabbitmq sh /etc/sentinelpipe/rabbitmq/provision.sh
 
 docker compose --env-file "$ENV_FILE" exec -T \
+    -e SENTINEL_DB_MIGRATION_USERNAME -e SENTINEL_DB_MIGRATION_PASSWORD \
+    -e SENTINEL_DB_USERNAME -e SENTINEL_DB_PASSWORD \
     -e SENTINEL_WORKER_DB_USERNAME -e SENTINEL_WORKER_DB_PASSWORD \
     -e SENTINEL_OPERATOR_DB_USERNAME -e SENTINEL_OPERATOR_DB_PASSWORD \
     postgres sh /etc/sentinelpipe/postgres/provision-roles.sh

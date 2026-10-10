@@ -11,6 +11,7 @@ import dev.sentinelpipe.api.project.ProjectService;
 import dev.sentinelpipe.api.scanjob.ScanJob;
 import dev.sentinelpipe.api.scanjob.ScanJobRepository;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -85,11 +86,13 @@ public class ScanService {
 
 	private final IdempotencyProperties idempotency;
 
+	private final ExecutionProperties execution;
+
 	private final Clock clock;
 
 	ScanService(ScanRepository scans, ScanJobRepository scanJobs, ProjectService projectService,
 			ScanRequestedEvents scanRequestedEvents, PlatformTransactionManager transactionManager,
-			IdempotencyProperties idempotency, Clock clock) {
+			IdempotencyProperties idempotency, ExecutionProperties execution, Clock clock) {
 		idempotency.validate();
 		this.scans = scans;
 		this.scanJobs = scanJobs;
@@ -99,6 +102,7 @@ public class ScanService {
 		this.readTransaction = new TransactionTemplate(transactionManager);
 		this.readTransaction.setReadOnly(true);
 		this.idempotency = idempotency;
+		this.execution = execution;
 		this.clock = clock;
 	}
 
@@ -108,9 +112,10 @@ public class ScanService {
 	 * constraint violation aborts the PostgreSQL transaction, so the replay lookup must
 	 * run in a new one.
 	 * <p>
-	 * A new scan and its {@code scan.requested} outbox event are written in one
-	 * transaction (transactional outbox); nothing is sent to the broker here. A replay
-	 * returns the existing scan and appends no event.
+	 * A new scan, its planned jobs ({@code sentinel.execution.planned-scanners}) and its
+	 * {@code scan.requested} outbox event are written in one transaction (transactional
+	 * outbox); nothing is sent to the broker here. A replay returns the existing scan and
+	 * appends no event.
 	 * @param idempotencyKey optional; {@code null} always creates a new scan
 	 */
 	public ScanRequestOutcome requestScan(UUID projectId, String commitSha, String branch, TriggerType triggerType,
@@ -137,14 +142,21 @@ public class ScanService {
 				if (idempotencyKey != null) {
 					releaseIfExpired(projectId, idempotencyKey);
 				}
+				Instant now = Timestamps.now(this.clock);
 				Scan scan = Scan.request(projectId, normalizedSha, validatedBranch, triggerType, idempotencyKey,
-						requestFingerprint, Timestamps.now(this.clock));
+						requestFingerprint, this.execution.leaseDurationSeconds(),
+						this.execution.executionTimeoutSeconds(), this.execution.evidenceRetentionDays(), now);
 				this.scans.saveAndFlush(scan);
+				List<ScanJob> jobs = this.execution.getPlannedScanners()
+					.stream()
+					.sorted(Comparator.comparing(Enum::name))
+					.map((scanner) -> this.scanJobs.saveAndFlush(ScanJob.plan(scan.getId(), scanner, now)))
+					.toList();
 				UUID correlationId = UUID.randomUUID();
 				this.scanRequestedEvents.append(scan, project, correlationId);
 				log.info("scan.requested scan_id={} project_id={} organization_id={} correlation_id={}", scan.getId(),
 						projectId, project.getOrganizationId(), correlationId);
-				return new ScanRequestOutcome(new ScanDetails(scan, List.of()), false);
+				return new ScanRequestOutcome(new ScanDetails(scan, jobs), false);
 			});
 		}
 		catch (DataIntegrityViolationException ex) {

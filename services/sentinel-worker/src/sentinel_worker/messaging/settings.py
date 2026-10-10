@@ -3,8 +3,8 @@
 The worker connects with its **own** least-privileged RabbitMQ user (read on the worker
 queue, write on the dead-letter and retry exchanges, no configure) and its **own**
 PostgreSQL login role (member of ``sentinel_worker``: EXECUTE on
-``worker.record_receipt`` only). Passwords have no default and are never included in
-error messages, reprs or logs.
+``worker.record_receipt`` and the execution protocol functions only). Passwords have no
+default and are never included in error messages, reprs or logs.
 """
 
 from __future__ import annotations
@@ -132,27 +132,38 @@ class ReceiptStoreSettings:
             path = env.get(RECEIPT_DB_VAR, "").strip() or ".sentinel-worker/receipts.sqlite3"
             return cls(backend=backend, database=None, sqlite_path=Path(path))
 
-        username = env.get(DB_USERNAME_VAR, "").strip()
-        if not username:
-            raise ConfigurationError(f"{DB_USERNAME_VAR} must be set")
-        password = env.get(DB_PASSWORD_VAR, "")
-        if not password:
-            raise ConfigurationError(f"{DB_PASSWORD_VAR} must be set")
-        sslmode = env.get(DB_SSLMODE_VAR, "").strip() or (
-            "verify-full" if environment is Environment.PRODUCTION else "prefer"
+        return cls(
+            backend=backend, database=worker_database_settings(environment, env), sqlite_path=None
         )
-        if sslmode not in SSL_MODES:
-            raise ConfigurationError(f"{DB_SSLMODE_VAR} must be one of: {', '.join(SSL_MODES)}")
-        if environment is Environment.PRODUCTION and sslmode not in PRODUCTION_SSL_MODES:
-            raise ConfigurationError(
-                f"{DB_SSLMODE_VAR} must be one of {', '.join(PRODUCTION_SSL_MODES)} in production"
-            )
-        database = DatabaseSettings(
-            host=env.get(DB_HOST_VAR, "localhost").strip() or "localhost",
-            port=_bounded_int(env, DB_PORT_VAR, default=5432, minimum=1, maximum=65535),
-            dbname=env.get(DB_NAME_VAR, "").strip() or "sentinelpipe",
-            user=username,
-            password=password,
-            sslmode=sslmode,
+
+
+def worker_database_settings(
+    environment: Environment, environ: Mapping[str, str] | None = None
+) -> DatabaseSettings:
+    """The worker's own PostgreSQL login (``SENTINEL_WORKER_DB_*``), shared by the receipt
+    store and the execution protocol. TLS with certificate verification is required in
+    production."""
+    env = os.environ if environ is None else environ
+    username = env.get(DB_USERNAME_VAR, "").strip()
+    if not username:
+        raise ConfigurationError(f"{DB_USERNAME_VAR} must be set")
+    password = env.get(DB_PASSWORD_VAR, "")
+    if not password:
+        raise ConfigurationError(f"{DB_PASSWORD_VAR} must be set")
+    sslmode = env.get(DB_SSLMODE_VAR, "").strip() or (
+        "verify-full" if environment is Environment.PRODUCTION else "prefer"
+    )
+    if sslmode not in SSL_MODES:
+        raise ConfigurationError(f"{DB_SSLMODE_VAR} must be one of: {', '.join(SSL_MODES)}")
+    if environment is Environment.PRODUCTION and sslmode not in PRODUCTION_SSL_MODES:
+        raise ConfigurationError(
+            f"{DB_SSLMODE_VAR} must be one of {', '.join(PRODUCTION_SSL_MODES)} in production"
         )
-        return cls(backend=backend, database=database, sqlite_path=None)
+    return DatabaseSettings(
+        host=env.get(DB_HOST_VAR, "localhost").strip() or "localhost",
+        port=_bounded_int(env, DB_PORT_VAR, default=5432, minimum=1, maximum=65535),
+        dbname=env.get(DB_NAME_VAR, "").strip() or "sentinelpipe",
+        user=username,
+        password=password,
+        sslmode=sslmode,
+    )

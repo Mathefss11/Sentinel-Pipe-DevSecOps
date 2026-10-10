@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 
 import dev.sentinelpipe.api.AbstractDomainApiIntegrationTest;
+import dev.sentinelpipe.api.DatabaseRoles;
 import dev.sentinelpipe.api.contract.ContractSchemas;
 import dev.sentinelpipe.api.messaging.CrashingPublishers;
 import dev.sentinelpipe.api.messaging.MessagingTopology;
@@ -42,9 +43,10 @@ import tools.jackson.databind.JsonNode;
  * process → shared receipt in PostgreSQL ({@code worker.processing_receipts}), verified
  * by the database against the committed outbox event.
  * <p>
- * Broker users come from the production provisioning script (provision.sh); the worker
- * and operator connect to PostgreSQL with login roles that are members of the
- * {@code sentinel_worker} and {@code sentinel_operator} group roles from Flyway V005.
+ * Broker users and database logins come from the production provisioning scripts
+ * (rabbitmq/provision.sh, postgres/provision-roles.sh): the API runs as the
+ * least-privileged API login, and the worker and operator as members of the
+ * {@code sentinel_worker} and {@code sentinel_operator} group roles.
  *
  * <p>
  * Runs only in the {@code e2e} Maven profile and requires
@@ -62,9 +64,10 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 
 	private static final String OPERATOR_PASSWORD = "e2o" + UUID.randomUUID().toString().replace("-", "");
 
-	private static final String WORKER_DB_USER = "sentinel_worker_e2e";
+	// Database logins created by the production provisioning script (DatabaseRoles).
+	private static final String WORKER_DB_USER = DatabaseRoles.WORKER_USER;
 
-	private static final String OPERATOR_DB_USER = "sentinel_operator_e2e";
+	private static final String OPERATOR_DB_USER = DatabaseRoles.OPERATOR_USER;
 
 	private static final Path RABBITMQ_PROVISIONING = Path.of("..", "..", "infrastructure", "docker", "rabbitmq")
 		.toAbsolutePath()
@@ -120,14 +123,6 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 						+ WORKER_PASSWORD + " SENTINEL_OPERATOR_RABBITMQ_PASSWORD=" + OPERATOR_PASSWORD
 						+ " sh /etc/sentinelpipe/rabbitmq/provision.sh");
 		assertThat(provisioned.getExitCode()).as("provision.sh").isZero();
-		// Database login roles, members of the group roles created by Flyway V005.
-		loginRole(WORKER_DB_USER, WORKER_PASSWORD, "sentinel_worker");
-		loginRole(OPERATOR_DB_USER, OPERATOR_PASSWORD, "sentinel_operator");
-	}
-
-	private void loginRole(String name, String password, String group) {
-		this.jdbcTemplate.execute("DROP ROLE IF EXISTS " + name);
-		this.jdbcTemplate.execute("CREATE ROLE " + name + " LOGIN PASSWORD '" + password + "' IN ROLE " + group);
 	}
 
 	/** Output of a finished worker process. */
@@ -148,7 +143,7 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 		env.put("SENTINEL_WORKER_DB_PORT", String.valueOf(this.postgres.getMappedPort(5432)));
 		env.put("SENTINEL_WORKER_DB_NAME", this.postgres.getDatabaseName());
 		env.put("SENTINEL_WORKER_DB_USERNAME", WORKER_DB_USER);
-		env.put("SENTINEL_WORKER_DB_PASSWORD", WORKER_PASSWORD);
+		env.put("SENTINEL_WORKER_DB_PASSWORD", DatabaseRoles.WORKER_PASSWORD);
 		env.put("SENTINEL_WORKER_DB_SSLMODE", "disable");
 		env.put("SENTINEL_WORKER_ENVIRONMENT", "ci");
 		env.put("SENTINEL_WORKER_LOG_LEVEL", "DEBUG");
@@ -185,7 +180,7 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 		env.put("SENTINEL_OPERATOR_DB_PORT", String.valueOf(this.postgres.getMappedPort(5432)));
 		env.put("SENTINEL_OPERATOR_DB_NAME", this.postgres.getDatabaseName());
 		env.put("SENTINEL_OPERATOR_DB_USERNAME", OPERATOR_DB_USER);
-		env.put("SENTINEL_OPERATOR_DB_PASSWORD", OPERATOR_PASSWORD);
+		env.put("SENTINEL_OPERATOR_DB_PASSWORD", DatabaseRoles.OPERATOR_PASSWORD);
 		env.put("SENTINEL_WORKER_DB_SSLMODE", "disable");
 		env.put("SENTINEL_WORKER_ENVIRONMENT", "ci");
 		builder.redirectErrorStream(true);
@@ -252,6 +247,7 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 		// Worker logs contain identifiers only: no credentials, no payload content.
 		assertThat(run.output()).contains(event.get("id").toString())
 			.doesNotContain(WORKER_PASSWORD)
+			.doesNotContain(DatabaseRoles.WORKER_PASSWORD)
 			.doesNotContain("e2e-confidential-repo");
 	}
 
@@ -318,7 +314,7 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 
 		assertThat(replay.exitCode()).as(replay.output()).isZero();
 		assertThat(this.jsonMapper.readTree(replay.output()).get("replayed").asInt()).isEqualTo(1);
-		assertThat(replay.output()).doesNotContain(OPERATOR_PASSWORD);
+		assertThat(replay.output()).doesNotContain(OPERATOR_PASSWORD).doesNotContain(DatabaseRoles.OPERATOR_PASSWORD);
 		assertThat(this.jdbcTemplate.queryForObject(
 				"SELECT operator FROM ops.recovery_actions WHERE action = 'DEAD_LETTER_REPLAY' AND event_id = ?",
 				String.class, event.get("id")))

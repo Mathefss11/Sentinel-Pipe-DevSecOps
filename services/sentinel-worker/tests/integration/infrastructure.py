@@ -6,8 +6,9 @@ what operators run:
 
 * RabbitMQ: infrastructure/docker/rabbitmq/provision.sh (topology from definitions.json,
   least-privileged publisher, worker and operator users);
-* PostgreSQL: the Flyway migrations V001..V005 from services/sentinel-api, then
-  infrastructure/docker/postgres/provision-roles.sh (worker and operator login roles).
+* PostgreSQL: infrastructure/docker/postgres/provision-roles.sh (owner, migrator, API,
+  worker and operator roles), then the Flyway migrations from services/sentinel-api, run
+  as the migrator login switched to ``sentinel_owner`` exactly like Flyway does.
 
 Credentials are random per run, hexadecimal (rabbitmqctl parses a leading "-" as an
 option), and never printed.
@@ -59,6 +60,8 @@ PUBLISHER_USER = "sentinel-publisher"
 OPERATOR_USER = "sentinel-operator"
 WORKER_DB_USER = "sentinel_worker_app"
 OPERATOR_DB_USER = "sentinel_operator_app"
+MIGRATOR_DB_USER = "sentinel_migrator_app"
+API_DB_USER = "sentinel_api_app"
 
 
 def new_password() -> str:
@@ -230,6 +233,16 @@ class SeededEvent:
 
 
 @dataclass(frozen=True)
+class SeededJob:
+    organization_id: uuid.UUID
+    project_id: uuid.UUID
+    scan_id: uuid.UUID
+    job_id: uuid.UUID
+    commit_sha: str
+    repository_name: str
+
+
+@dataclass(frozen=True)
 class ControlPlane:
     host: str
     port: int
@@ -329,6 +342,96 @@ class ControlPlane:
             ).fetchone()[0]
         return SeededEvent(message=json.loads(body), body=body.encode("utf-8"))
 
+    def seed_fixture_job(self, lease_seconds: int = 60) -> SeededJob:
+        """A queued scan with one FIXTURE job, as the control plane plans it."""
+        organization_id, project_id, scan_id, job_id = (uuid.uuid4() for _ in range(4))
+        suffix = uuid.uuid4().hex[:10]
+        now = datetime.now(UTC)
+        commit_sha = secrets.token_hex(20)
+        with self.admin() as connection, connection.transaction():
+            connection.execute(
+                "INSERT INTO organizations (id, name, slug, version, created_at, updated_at)"
+                " VALUES (%s, %s, %s, 0, %s, %s)",
+                (organization_id, f"Org {suffix}", f"org-{suffix}", now, now),
+            )
+            connection.execute(
+                "INSERT INTO projects (id, organization_id, name, repository_provider,"
+                " repository_owner, repository_name, default_branch, enabled, version,"
+                " created_at, updated_at)"
+                " VALUES (%s, %s, %s, 'GITHUB', 'acme', %s, 'main', true, 0, %s, %s)",
+                (project_id, organization_id, f"Project {suffix}", f"repo-{suffix}", now, now),
+            )
+            connection.execute(
+                "INSERT INTO scans (id, project_id, commit_sha, branch, trigger_type,"
+                " execution_status, security_decision, version, requested_at, updated_at,"
+                " lease_duration_seconds, execution_timeout_seconds)"
+                " VALUES (%s, %s, %s, 'main', 'PUSH', 'QUEUED', 'PENDING', 0, %s, %s, %s, 900)",
+                (scan_id, project_id, commit_sha, now, now, lease_seconds),
+            )
+            connection.execute(
+                "INSERT INTO scan_jobs (id, scan_id, scanner_type, execution_status,"
+                " attempt_count, version, created_at, updated_at)"
+                " VALUES (%s, %s, 'FIXTURE', 'QUEUED', 0, 0, %s, %s)",
+                (job_id, scan_id, now, now),
+            )
+        return SeededJob(organization_id, project_id, scan_id, job_id, commit_sha, f"repo-{suffix}")
+
+    def job_state(self, job_id: uuid.UUID) -> dict[str, Any]:
+        with self.admin() as connection:
+            row = connection.execute(
+                "SELECT execution_status, attempt_count, lease_epoch, lease_owner, failure_reason"
+                " FROM scan_jobs WHERE id = %s",
+                (job_id,),
+            ).fetchone()
+        keys = ("status", "attempts", "epoch", "owner", "failure_reason")
+        return dict(zip(keys, row, strict=True))
+
+    def scan_status(self, scan_id: uuid.UUID) -> str:
+        with self.admin() as connection:
+            return str(
+                connection.execute(
+                    "SELECT execution_status FROM scans WHERE id = %s", (scan_id,)
+                ).fetchone()[0]
+            )
+
+    def expire_lease(self, job_id: uuid.UUID) -> None:
+        """Time travel: the job's lease expired a second ago (a crashed worker)."""
+        with self.admin() as connection:
+            connection.execute(
+                "UPDATE scan_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = %s",
+                (job_id,),
+            )
+
+    def make_retry_due(self, job_id: uuid.UUID) -> None:
+        with self.admin() as connection:
+            connection.execute(
+                "UPDATE scan_jobs SET next_attempt_at = now() - interval '1 second' WHERE id = %s",
+                (job_id,),
+            )
+
+    def supervise(self) -> None:
+        """One control-plane supervisor pass (as the API would run it)."""
+        with self.admin() as connection:
+            connection.execute("SELECT * FROM lifecycle.supervise(100)").fetchone()
+
+    def cancel(self, scan_id: uuid.UUID) -> str:
+        with self.admin() as connection:
+            return str(
+                connection.execute(
+                    "SELECT lifecycle.cancel_scan(%s, 'user:test')", (scan_id,)
+                ).fetchone()[0]
+            )
+
+    def terminate_worker_connections(self) -> int:
+        """Failure injection: kills every connection of the worker login."""
+        with self.admin() as connection:
+            return len(
+                connection.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = %s",
+                    (WORKER_DB_USER,),
+                ).fetchall()
+            )
+
     def receipt_rows(self, event_id: str) -> list[tuple[Any, ...]]:
         with self.admin() as connection:
             return connection.execute(
@@ -350,29 +453,35 @@ def provision_control_plane(container: Any, admin_user: str, admin_password: str
     host = container.get_container_host_ip()
     port = int(container.get_exposed_port(5432))
     dbname = "sentinelpipe"
-    admin = DatabaseSettings(
-        host=host,
-        port=port,
-        dbname=dbname,
-        user=admin_user,
-        password=admin_password,
-        sslmode="disable",
-    )
-    with psycopg.connect(**admin.connection_kwargs("sentinel-tests-migrate")) as connection:
-        for script in sorted(MIGRATIONS_DIR.glob("V*.sql")):
-            # No parameters: psycopg sends the script with the simple query protocol.
-            connection.execute(script.read_text(encoding="utf-8").encode("utf-8"))
     copy_directory(container, POSTGRES_PROVISIONING_DIR, "/etc/sentinelpipe/postgres")
-    worker, operator = new_password(), new_password()
+    migrator, api, worker, operator = new_password(), new_password(), new_password(), new_password()
     run_script(
         container,
         "/etc/sentinelpipe/postgres/provision-roles.sh",
         {
+            "SENTINEL_DB_MIGRATION_USERNAME": MIGRATOR_DB_USER,
+            "SENTINEL_DB_MIGRATION_PASSWORD": migrator,
+            "SENTINEL_DB_USERNAME": API_DB_USER,
+            "SENTINEL_DB_PASSWORD": api,
             "SENTINEL_WORKER_DB_USERNAME": WORKER_DB_USER,
             "SENTINEL_WORKER_DB_PASSWORD": worker,
             "SENTINEL_OPERATOR_DB_USERNAME": OPERATOR_DB_USER,
             "SENTINEL_OPERATOR_DB_PASSWORD": operator,
         },
-        [worker, operator],
+        [migrator, api, worker, operator],
     )
+    migration = DatabaseSettings(
+        host=host,
+        port=port,
+        dbname=dbname,
+        user=MIGRATOR_DB_USER,
+        password=migrator,
+        sslmode="disable",
+    )
+    with psycopg.connect(**migration.connection_kwargs("sentinel-tests-migrate")) as connection:
+        # Like spring.flyway.init-sqls: every object belongs to the non-superuser owner.
+        connection.execute("SET ROLE sentinel_owner")
+        for script in sorted(MIGRATIONS_DIR.glob("V*.sql")):
+            # No parameters: psycopg sends the script with the simple query protocol.
+            connection.execute(script.read_text(encoding="utf-8").encode("utf-8"))
     return ControlPlane(host, port, dbname, admin_user, admin_password, worker, operator, container)

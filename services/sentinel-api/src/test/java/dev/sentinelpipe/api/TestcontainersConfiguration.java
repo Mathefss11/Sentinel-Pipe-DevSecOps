@@ -3,6 +3,7 @@ package dev.sentinelpipe.api;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.context.annotation.Bean;
+import org.springframework.test.context.DynamicPropertyRegistrar;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.rabbitmq.RabbitMQContainer;
 import org.testcontainers.utility.DockerImageName;
@@ -12,9 +13,15 @@ import org.testcontainers.utility.DockerImageName;
  * repository's {@code compose.yaml} so tests and local development run identical images.
  * Testcontainers does not accept the combined {@code name:tag@digest} form, so the
  * images are referenced by digest only.
+ * <p>
+ * PostgreSQL is provisioned like a deployment ({@link DatabaseRoles}): the application
+ * runs as the least-privileged API login and Flyway as the migrator login (switching to
+ * {@code sentinel_owner}). The container superuser is reachable only through
+ * {@link TestDatabaseAdmin}. A {@code @ServiceConnection} is therefore not used for
+ * PostgreSQL: it would connect the application as the superuser.
  */
 @TestConfiguration(proxyBeanMethods = false)
-class TestcontainersConfiguration {
+public class TestcontainersConfiguration {
 
 	// postgres:18.6-alpine
 	static final DockerImageName POSTGRES_IMAGE = DockerImageName
@@ -25,9 +32,28 @@ class TestcontainersConfiguration {
 		.parse("rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95");
 
 	@Bean
-	@ServiceConnection
 	PostgreSQLContainer postgresContainer() {
-		return new PostgreSQLContainer(POSTGRES_IMAGE);
+		PostgreSQLContainer postgres = new PostgreSQLContainer(POSTGRES_IMAGE);
+		// Roles must exist before Flyway runs, so the container is started here.
+		postgres.start();
+		DatabaseRoles.provision(postgres);
+		return postgres;
+	}
+
+	@Bean
+	DynamicPropertyRegistrar databaseConnections(PostgreSQLContainer postgres) {
+		return (registry) -> {
+			registry.add("spring.datasource.url", postgres::getJdbcUrl);
+			registry.add("spring.datasource.username", () -> DatabaseRoles.API_USER);
+			registry.add("spring.datasource.password", () -> DatabaseRoles.API_PASSWORD);
+			registry.add("spring.flyway.user", () -> DatabaseRoles.MIGRATOR_USER);
+			registry.add("spring.flyway.password", () -> DatabaseRoles.MIGRATOR_PASSWORD);
+		};
+	}
+
+	@Bean
+	TestDatabaseAdmin testDatabaseAdmin(PostgreSQLContainer postgres) {
+		return new TestDatabaseAdmin(postgres);
 	}
 
 	@Bean

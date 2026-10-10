@@ -140,9 +140,82 @@ jobs:
 
       - name: Test
         # The runner is ephemeral, so Testcontainers' resource reaper (an extra image) is not needed.
+        # Sandbox tests run in the dedicated sandbox job.
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: python -m pytest
+        run: python -m pytest -m "not sandbox"
+
+  sandbox:
+    name: Sandbox isolation (real containers)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: services/sentinel-worker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/sentinel-worker/pyproject.toml
+
+      - name: Install
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      # See the api job for why images are pulled up front with optional read-only credentials.
+      - name: Check for Docker Hub credentials
+        id: dockerhub
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Docker Hub credentials not configured; pulling anonymously."
+          fi
+
+      - name: Log in to Docker Hub (read-only)
+        if: steps.dockerhub.outputs.configured == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The sandbox image must match FIXTURE_IMAGE in sentinel_worker/sandbox/policy.py. Workers
+      # never pull at execution time (--pull never).
+      - name: Pre-pull sandbox and Testcontainers images
+        run: >-
+          sh "$GITHUB_WORKSPACE/scripts/ci/pull-images.sh"
+          alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+          postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+          rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
+
+      # Logged out before any sandbox runs: no registry credential exists during the tests.
+      - name: Log out of Docker Hub
+        if: always()
+        run: docker logout
+
+      # Isolation controls verified from inside a real sandbox on this runner.
+      - name: Sandbox self-check
+        run: sentinel-worker sandbox-check
+
+      # Isolation, limits, timeouts, cancellation, cleanup and crash recovery, plus the full
+      # protocol with PostgreSQL. A missing runtime or image fails instead of skipping.
+      - name: Sandbox tests
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+          SENTINEL_REQUIRE_SANDBOX: "1"
+        run: python -m pytest -m sandbox -v
+
+      - name: No sandbox left behind
+        if: always()
+        run: test -z "$(docker ps --all --quiet --filter label=sentinelpipe.sandbox=1)"
 
   e2e:
     name: End-to-end (API → outbox → RabbitMQ → worker)
@@ -190,13 +263,15 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Must match TestcontainersConfiguration.java and the Ryuk image used by Testcontainers.
-      - name: Pre-pull Testcontainers images
+      # Must match TestcontainersConfiguration.java and the Ryuk image used by Testcontainers;
+      # the alpine image is the worker's sandbox image (sentinel_worker/sandbox/policy.py).
+      - name: Pre-pull Testcontainers and sandbox images
         run: >-
           sh scripts/ci/pull-images.sh
           postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
           rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
           testcontainers/ryuk:0.14.0
+          alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
 
       - name: Log out of Docker Hub
         if: always()
@@ -204,7 +279,8 @@ jobs:
 
       # Java scan creation, outbox publication with confirms, RabbitMQ delivery, and the real
       # Python worker process recording its receipt in PostgreSQL, verified against the
-      # outbox (ScanDeliveryE2ETests); forged messages and an audited operator DLQ replay.
+      # outbox (ScanDeliveryE2ETests); forged messages and an audited operator DLQ replay;
+      # sandboxed execution, cancellation and crash recovery (ScanExecutionE2ETests).
       # The e2e profile sets failIfNoTests, so this step fails if no E2E test runs.
       - name: Run end-to-end tests
         working-directory: services/sentinel-api
@@ -271,6 +347,9 @@ jobs:
 
       - name: Verify broker permissions
         run: sh scripts/ci/verify-broker-permissions.sh .env.example
+
+      - name: Verify database roles
+        run: sh scripts/ci/verify-database-roles.sh .env.example
 
       - name: Show service status
         if: always()

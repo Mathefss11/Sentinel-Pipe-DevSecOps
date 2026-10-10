@@ -9,10 +9,12 @@ import com.networknt.schema.SchemaLocation;
 import com.networknt.schema.SchemaRegistry;
 import com.networknt.schema.SpecificationVersion;
 import dev.sentinelpipe.api.AbstractDomainApiIntegrationTest;
+import dev.sentinelpipe.api.ExecutionTimeTravel;
+import dev.sentinelpipe.api.TestDatabaseAdmin;
 import dev.sentinelpipe.api.TestJwts;
+import dev.sentinelpipe.api.WorkerProtocol;
 import dev.sentinelpipe.api.scan.ScanLifecycleService;
 import dev.sentinelpipe.api.scan.SecurityDecision;
-import dev.sentinelpipe.api.scanjob.ScanJob;
 import dev.sentinelpipe.api.scanjob.ScannerType;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -35,6 +37,9 @@ class ContractIntegrationTests extends AbstractDomainApiIntegrationTest {
 
 	@Autowired
 	private ScanLifecycleService lifecycle;
+
+	@Autowired
+	private TestDatabaseAdmin admin;
 
 	private JsonNode getJson(String path, Object... variables) throws Exception {
 		return json(this.mockMvc.perform(get(path, variables)).andReturn());
@@ -114,28 +119,67 @@ class ContractIntegrationTests extends AbstractDomainApiIntegrationTest {
 
 	@Test
 	void scanResponsesMatchTheirSchemasInEveryLifecycleState() throws Exception {
+		WorkerProtocol worker = WorkerProtocol.asWorker(this.admin);
 		UUID projectId = createProject();
 		MvcResult created = requestScan(projectId, randomSha(), "contract-key");
 		JsonNode queued = json(created);
 		assertValid("scan.schema.json", queued);
 
+		// RUNNING with a running and a queued job, then CANCELLED.
 		UUID scanId = UUID.fromString(queued.get("id").asString());
-		ScanJob semgrep = this.lifecycle.planJob(scanId, ScannerType.SEMGREP);
+		this.lifecycle.planJob(scanId, ScannerType.FIXTURE);
 		this.lifecycle.planJob(scanId, ScannerType.GITLEAKS);
-		this.lifecycle.startScan(scanId);
-		this.lifecycle.startJob(semgrep.getId());
+		worker.claimFixtureOrFail(scanId);
 		JsonNode running = getJson("/api/v1/scans/{id}", scanId);
 		assertThat(running.get("jobs")).hasSize(2);
+		assertThat(running.get("deadlineAt").isNull()).isFalse();
 		assertValid("scan.schema.json", running);
 
-		this.lifecycle.cancelScan(scanId);
+		this.lifecycle.cancelScan(scanId, "user:contract");
 		JsonNode cancelled = getJson("/api/v1/scans/{id}", scanId);
 		assertThat(cancelled.get("securityDecision").asString()).isEqualTo(SecurityDecision.INCOMPLETE.name());
+		assertThat(cancelled.get("decisionReason").asString()).isEqualTo("CANCELLED_BY_USER");
 		assertValid("scan.schema.json", cancelled);
 		for (JsonNode job : cancelled.get("jobs")) {
 			assertValid("scan-job.schema.json", job);
 		}
+
+		// EVALUATING, then COMPLETED (INCOMPLETE), with a retried job carrying its failure reason.
+		UUID evaluatedId = UUID.fromString(json(requestScan(projectId, randomSha(), null)).get("id").asString());
+		this.lifecycle.planJob(evaluatedId, ScannerType.FIXTURE);
+		WorkerProtocol.Lease first = worker.claimFixtureOrFail(evaluatedId);
+		worker.fail(first, "SANDBOX_ERROR");
+		JsonNode retrying = getJson("/api/v1/scans/{id}", evaluatedId);
+		assertThat(retrying.at("/jobs/0/failureReason").asString()).isEqualTo("SANDBOX_ERROR");
+		assertValid("scan.schema.json", retrying);
+		new ExecutionTimeTravel(this.admin).makeRetryDue(first.jobId());
+		worker.complete(worker.claimFixtureOrFail(evaluatedId));
+		JsonNode evaluating = getJson("/api/v1/scans/{id}", evaluatedId);
+		assertThat(evaluating.get("executionStatus").asString()).isEqualTo("EVALUATING");
+		assertValid("scan.schema.json", evaluating);
+		this.lifecycle.evaluate(evaluatedId);
+		JsonNode completed = getJson("/api/v1/scans/{id}", evaluatedId);
+		assertThat(completed.get("executionStatus").asString()).isEqualTo("COMPLETED");
+		assertValid("scan.schema.json", completed);
+
 		assertValid("scan-page.schema.json", getJson("/api/v1/projects/{id}/scans", projectId));
+	}
+
+	@Test
+	void cancellationResponsesMatchTheScanSchema() throws Exception {
+		UUID projectId = createProject();
+		UUID scanId = UUID.fromString(json(requestScan(projectId, randomSha(), null)).get("id").asString());
+
+		MvcResult cancelled = this.mockMvc.perform(post("/api/v1/projects/{p}/scans/{s}/cancel", projectId, scanId))
+			.andReturn();
+
+		assertThat(cancelled.getResponse().getStatus()).isEqualTo(200);
+		assertValid("scan.schema.json", json(cancelled));
+		MvcResult conflict = this.mockMvc
+			.perform(post("/api/v1/projects/{p}/scans/{s}/cancel", projectId, UUID.randomUUID()))
+			.andReturn();
+		assertThat(conflict.getResponse().getStatus()).isEqualTo(404);
+		assertValid("problem-details.schema.json", json(conflict));
 	}
 
 	@Test

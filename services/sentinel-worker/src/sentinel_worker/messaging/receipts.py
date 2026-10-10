@@ -12,7 +12,8 @@ Backends:
   in the shared control-plane PostgreSQL database (Flyway V005, schema ``worker``), so
   every worker instance deduplicates against the same unique ``event_id``. The worker's
   database role may only execute ``worker.record_receipt``, which also verifies the
-  message against the authoritative outbox event, scan and project before accepting it.
+  message against the authoritative outbox event, scan and project before accepting it,
+  and the execution protocol functions (:mod:`sentinel_worker.execution.leases`).
 * :class:`SqliteReceiptStore` (development only): a local file. It deduplicates only
   within one host and cannot verify tenant relationships; see
   docs/runbooks/messaging.md, "Known limitations".

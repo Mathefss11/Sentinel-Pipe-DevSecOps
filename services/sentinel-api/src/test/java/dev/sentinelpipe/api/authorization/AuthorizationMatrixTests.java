@@ -24,6 +24,7 @@ class AuthorizationMatrixTests {
 				OrganizationPermission.VIEW_PROJECTS, EnumSet.of(OWNER, ADMIN, MEMBER, VIEWER),
 				OrganizationPermission.VIEW_SCANS, EnumSet.of(OWNER, ADMIN, MEMBER, VIEWER),
 				OrganizationPermission.REQUEST_SCAN, EnumSet.of(OWNER, ADMIN, MEMBER),
+				OrganizationPermission.CANCEL_SCAN, EnumSet.of(OWNER, ADMIN, MEMBER),
 				OrganizationPermission.REGISTER_PROJECT, EnumSet.of(OWNER, ADMIN),
 				OrganizationPermission.VIEW_MEMBERS, EnumSet.of(OWNER, ADMIN),
 				OrganizationPermission.MANAGE_MEMBERS, EnumSet.of(OWNER, ADMIN));

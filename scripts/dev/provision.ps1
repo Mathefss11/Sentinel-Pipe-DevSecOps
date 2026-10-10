@@ -4,7 +4,8 @@
 
 .DESCRIPTION
     RabbitMQ:   topology (definitions.json) and the publisher, worker and operator users.
-    PostgreSQL: the worker and operator login roles.
+    PostgreSQL: group roles, ownership transfer (upgrade path) and the migrator, API,
+                worker and operator login roles.
 
     Values come from the current environment, or from the env file (default .env) for
     variables that are not already set. Secrets are passed to the containers as
@@ -23,6 +24,8 @@ $names = @(
     "SENTINEL_RABBITMQ_PUBLISHER_USERNAME", "SENTINEL_RABBITMQ_PUBLISHER_PASSWORD",
     "SENTINEL_WORKER_RABBITMQ_USERNAME", "SENTINEL_WORKER_RABBITMQ_PASSWORD",
     "SENTINEL_OPERATOR_RABBITMQ_USERNAME", "SENTINEL_OPERATOR_RABBITMQ_PASSWORD",
+    "SENTINEL_DB_MIGRATION_USERNAME", "SENTINEL_DB_MIGRATION_PASSWORD",
+    "SENTINEL_DB_USERNAME", "SENTINEL_DB_PASSWORD",
     "SENTINEL_WORKER_DB_USERNAME", "SENTINEL_WORKER_DB_PASSWORD",
     "SENTINEL_OPERATOR_DB_USERNAME", "SENTINEL_OPERATOR_DB_PASSWORD"
 )
@@ -45,7 +48,7 @@ $rabbit += @("rabbitmq", "sh", "/etc/sentinelpipe/rabbitmq/provision.sh")
 if ($LASTEXITCODE -ne 0) { throw "RabbitMQ provisioning failed (exit $LASTEXITCODE)" }
 
 $postgres = @("compose", "--env-file", $EnvFile, "exec", "-T")
-foreach ($name in $names | Where-Object { $_ -like "*_DB_*" }) { $postgres += @("-e", $name) }
+foreach ($name in $names | Where-Object { $_ -like "SENTINEL_*DB_*" }) { $postgres += @("-e", $name) }
 $postgres += @("postgres", "sh", "/etc/sentinelpipe/postgres/provision-roles.sh")
 & docker @postgres
 if ($LASTEXITCODE -ne 0) { throw "PostgreSQL role provisioning failed (exit $LASTEXITCODE)" }

@@ -108,7 +108,8 @@ class MessagingContractIntegrationTests extends AbstractDomainApiIntegrationTest
 			.getSchema(SchemaLocation.of("https://json-schema.org/draft/2020-12/schema"));
 		List<String> files = ContractSchemas.messageSchemaFileNames();
 		assertThat(files).containsExactlyInAnyOrder("scan-requested.v1.schema.json",
-				"processing-receipt.v1.schema.json", "dead-letter-metadata.v1.schema.json");
+				"processing-receipt.v1.schema.json", "dead-letter-metadata.v1.schema.json", "job-result.v1.schema.json",
+				"sandbox-output.v1.schema.json");
 		for (String file : files) {
 			JsonNode schema = this.jsonMapper.readTree(Files.readString(ContractSchemas.MESSAGE_SCHEMAS_DIR.resolve(file)));
 			assertThat(metaSchema.validate(schema)).as(file).isEmpty();

@@ -46,7 +46,7 @@ Status: M2 Phase 2C. Decision records: [ADR-0004](../adr/0004-transactional-outb
 | API → broker | Least-privileged publisher identity: write `sentinel.scan-requests` only; no configure (cannot alter topology) and no read. Topology is provisioned by an administrator from `definitions.json`. |
 | Broker → worker | The worker treats messages as **untrusted input**: bounded size, strict JSON (no duplicate keys or NaN), schema validation with ECMA-262 anchors, property consistency checks. A message is never an authorization credential. |
 | Worker → broker | Least privilege: read the work queue; write only to the retry and dead-letter exchanges; no configure. It cannot inject scan requests or read dead letters. |
-| Worker → database | Role `sentinel_worker`: EXECUTE `worker.record_receipt` only, with no table privileges. It cannot read scans, organizations or outbox payloads, cannot modify control-plane rows, and cannot read or alter receipts directly. |
+| Worker → database | Role `sentinel_worker`: EXECUTE `worker.record_receipt` (and, since V007, the execution protocol functions of [ADR-0007](../adr/0007-database-authoritative-execution-leases.md)) only, with no table privileges. It cannot read scans, organizations or outbox payloads, cannot modify control-plane rows, and cannot read or alter receipts directly. |
 | Worker state | Receipts are shared by all workers and keyed by `event_id`. A message is accepted only if it is byte-identical to the committed outbox payload and its scan, project, organization and commit match the authoritative rows. Receipt identifiers are copied from those rows, so payload tenant identifiers are never trusted. Forged and altered messages are dead-lettered and recorded in `worker.delivery_rejections`; they cannot occupy a genuine `event_id`. |
 | Operator → system | Separate broker user and database role (`sentinel_operator`). Recovery is bounded and audited before it takes effect (`ops.recovery_actions`). There are no recovery HTTP endpoints. |
 
@@ -84,10 +84,10 @@ absorbed by `event_id` deduplication (receipts) or is visible as a duplicate dea
 
 A processing receipt with `outcome: ACCEPTED` means only that the worker **validated the
 message and durably accepted it** for processing. It does not mean that a repository was
-cloned, that a scanner ran, or that any security result exists. No scanner runs in this
-phase, and the control plane's scan stays `QUEUED` / `PENDING` (asserted end to end in
-`ScanDeliveryE2ETests`). Execution states will come from later phases through separate,
-authenticated status events.
+cloned, that a scanner ran, or that any security result exists; the scan stays `QUEUED` /
+`PENDING` (asserted end to end in `ScanDeliveryE2ETests`). Execution state changes only
+through the lease-based execution protocol in PostgreSQL
+([execution lifecycle](execution-lifecycle.md)), never through queue messages.
 
 ## Guarantees and non-guarantees
 

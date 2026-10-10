@@ -18,7 +18,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from prometheus_client import CollectorRegistry, Counter, start_http_server
+from prometheus_client import CollectorRegistry, Counter, Histogram, start_http_server
 
 from sentinel_worker.config import ConfigurationError
 
@@ -94,6 +94,116 @@ class WorkerMetrics:
             self.store_errors.inc()
 
 
+CLAIM_OUTCOMES = frozenset({"claimed", "empty", "error"})
+HEARTBEAT_STATUSES = frozenset({"renewed", "cancelled", "deadline_exceeded", "lease_lost", "error"})
+RESULT_OUTCOMES = frozenset(
+    {
+        "accepted",
+        "duplicate",
+        "conflict",
+        "rejected_unknown_job",
+        "rejected_scan_mismatch",
+        "rejected_stale_epoch",
+        "rejected_unknown_epoch",
+        "rejected_not_lease_owner",
+        "rejected_token_mismatch",
+        "rejected_job_not_running",
+        "rejected_lease_expired",
+        "rejected_deadline_exceeded",
+        "rejected_context_mismatch",
+        "rejected_missing_artifact",
+        "rejected_artifact_mismatch",
+        "rejected_unsupported_schema_version",
+        "error",
+    }
+)
+RUN_OUTCOMES = frozenset({"reported", "abandoned", "rejected", "unreported"})
+EVIDENCE_OUTCOMES = frozenset({"stored", "refused", "error"})
+SCANNER_TYPES = frozenset({"SEMGREP", "GITLEAKS", "TRIVY", "CHECKOV", "SYFT", "ZAP", "FIXTURE"})
+DURATION_BUCKETS = (0.5, 1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0)
+
+
+class ExecutionMetrics:
+    """Job execution metrics (``sentinel-worker execute``). Labels are validated against
+    the fixed sets above; identifiers, tokens and evidence never become labels."""
+
+    def __init__(self, registry: CollectorRegistry | None = None) -> None:
+        self.registry = registry if registry is not None else CollectorRegistry()
+        self.claims = Counter(
+            "sentinel_worker_job_claims",
+            "Claim attempts by outcome.",
+            ["outcome"],
+            registry=self.registry,
+        )
+        self.heartbeats = Counter(
+            "sentinel_worker_heartbeats",
+            "Lease heartbeats by answer.",
+            ["status"],
+            registry=self.registry,
+        )
+        self.results = Counter(
+            "sentinel_worker_job_results",
+            "Result submissions by the control plane's answer (sanitized code).",
+            ["outcome"],
+            registry=self.registry,
+        )
+        self.runs = Counter(
+            "sentinel_worker_job_runs",
+            "Claimed jobs by final outcome.",
+            ["outcome"],
+            registry=self.registry,
+        )
+        self.evidence = Counter(
+            "sentinel_worker_evidence_uploads",
+            "Evidence uploads by outcome.",
+            ["outcome"],
+            registry=self.registry,
+        )
+        self.duration = Histogram(
+            "sentinel_worker_job_execution_seconds",
+            "Executor wall-clock time per job attempt.",
+            ["scanner_type"],
+            buckets=DURATION_BUCKETS,
+            registry=self.registry,
+        )
+        for outcome in CLAIM_OUTCOMES:
+            self.claims.labels(outcome=outcome)
+        for status in HEARTBEAT_STATUSES:
+            self.heartbeats.labels(status=status)
+        for outcome in RESULT_OUTCOMES:
+            self.results.labels(outcome=outcome)
+        for outcome in RUN_OUTCOMES:
+            self.runs.labels(outcome=outcome)
+        for outcome in EVIDENCE_OUTCOMES:
+            self.evidence.labels(outcome=outcome)
+
+    @staticmethod
+    def _checked(value: str, allowed: frozenset[str]) -> str:
+        if value not in allowed:
+            raise ValueError("unknown metric label")
+        return value
+
+    def claim(self, outcome: str) -> None:
+        self.claims.labels(outcome=self._checked(outcome, CLAIM_OUTCOMES)).inc()
+
+    def heartbeat(self, status: str) -> None:
+        self.heartbeats.labels(status=self._checked(status.lower(), HEARTBEAT_STATUSES)).inc()
+
+    def result(self, outcome: str) -> None:
+        self.results.labels(outcome=self._checked(outcome.lower(), RESULT_OUTCOMES)).inc()
+
+    def run(self, outcome: str) -> None:
+        self.runs.labels(outcome=self._checked(outcome, RUN_OUTCOMES)).inc()
+
+    def upload(self, outcome: str) -> None:
+        self.evidence.labels(outcome=self._checked(outcome, EVIDENCE_OUTCOMES)).inc()
+
+    def executed(self, scanner_type: str, seconds: float) -> None:
+        self.duration.labels(scanner_type=self._checked(scanner_type, SCANNER_TYPES)).observe(
+            max(seconds, 0.0)
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class MetricsSettings:
     port: int | None
@@ -121,7 +231,7 @@ class MetricsSettings:
         return cls(port=port, address=address)
 
 
-def serve(metrics: WorkerMetrics, settings: MetricsSettings) -> None:
+def serve(metrics: WorkerMetrics | ExecutionMetrics, settings: MetricsSettings) -> None:
     """Starts the exposition server in a daemon thread when a port is configured."""
     if settings.port is not None:
         start_http_server(settings.port, addr=settings.address, registry=metrics.registry)

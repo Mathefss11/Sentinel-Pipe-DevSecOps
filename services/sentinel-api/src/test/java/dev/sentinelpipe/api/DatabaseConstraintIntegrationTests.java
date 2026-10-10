@@ -257,7 +257,15 @@ class DatabaseConstraintIntegrationTests extends AbstractDomainApiIntegrationTes
 			.hasMessageContaining("ck_scan_jobs_scanner_type");
 		assertThatThrownBy(() -> insertJob(scanId, "TRIVY", "RUNNING", 4, NOW, null))
 			.hasMessageContaining("ck_scan_jobs_attempt_count");
-		assertThatThrownBy(() -> insertJob(scanId, "TRIVY", "RUNNING", 0, NOW, null))
+		// V007: a RUNNING job always holds a lease.
+		assertThatThrownBy(() -> insertJob(scanId, "TRIVY", "RUNNING", 1, NOW, null))
+			.hasMessageContaining("ck_scan_jobs_lease");
+		// A RUNNING job (with a lease) has used at least one attempt.
+		assertThatThrownBy(() -> this.jdbcTemplate.update("""
+				INSERT INTO scan_jobs (id, scan_id, scanner_type, execution_status, attempt_count, version,
+				    created_at, started_at, updated_at, lease_epoch, lease_owner, lease_token_sha256, lease_expires_at)
+				VALUES (?, ?, 'TRIVY', 'RUNNING', 0, 0, ?, ?, ?, 1, 'worker', repeat('a', 64), ?)
+				""", UUID.randomUUID(), scanId, NOW, NOW, LATER, LATER))
 			.hasMessageContaining("ck_scan_jobs_status_timestamps");
 		assertThatThrownBy(() -> insertJob(UUID.randomUUID(), "TRIVY", "QUEUED", 0, null, null))
 			.hasMessageContaining("fk_scan_jobs_scan");

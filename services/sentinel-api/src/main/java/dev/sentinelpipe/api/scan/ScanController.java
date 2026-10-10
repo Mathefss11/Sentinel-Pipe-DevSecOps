@@ -3,6 +3,9 @@ package dev.sentinelpipe.api.scan;
 import dev.sentinelpipe.api.authorization.AccessControl;
 import dev.sentinelpipe.api.authorization.OrganizationPermission;
 import dev.sentinelpipe.api.common.PageResponse;
+import dev.sentinelpipe.api.common.ResourceNotFoundException;
+import dev.sentinelpipe.api.identity.CurrentPrincipal;
+import dev.sentinelpipe.api.identity.UserIdentityService;
 import dev.sentinelpipe.api.project.ProjectService;
 import dev.sentinelpipe.api.common.Pagination;
 import dev.sentinelpipe.api.security.ConditionalOnDomainApiEnabled;
@@ -24,8 +27,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Scan request and read endpoints. Lifecycle transitions are intentionally not exposed;
- * see {@link ScanLifecycleService}.
+ * Scan request, read and cancellation endpoints. Execution transitions are not exposed:
+ * they belong to authenticated workers and the supervisor (see {@link ScanLifecycleService}
+ * and ADR-0007).
  */
 @RestController
 @ConditionalOnDomainApiEnabled
@@ -42,10 +46,20 @@ class ScanController {
 
 	private final AccessControl accessControl;
 
-	ScanController(ScanService scanService, ProjectService projectService, AccessControl accessControl) {
+	private final ScanLifecycleService lifecycle;
+
+	private final CurrentPrincipal currentPrincipal;
+
+	private final UserIdentityService identities;
+
+	ScanController(ScanService scanService, ProjectService projectService, AccessControl accessControl,
+			ScanLifecycleService lifecycle, CurrentPrincipal currentPrincipal, UserIdentityService identities) {
 		this.scanService = scanService;
 		this.projectService = projectService;
 		this.accessControl = accessControl;
+		this.lifecycle = lifecycle;
+		this.currentPrincipal = currentPrincipal;
+		this.identities = identities;
 	}
 
 	/** Authorizes against the organization that owns the project; 404 for non-members. */
@@ -78,6 +92,26 @@ class ScanController {
 		UUID organizationId = this.projectService.get(details.scan().getProjectId()).getOrganizationId();
 		this.accessControl.require(organizationId, OrganizationPermission.VIEW_SCANS, "Scan", scanId);
 		return ScanResponse.from(details);
+	}
+
+	/**
+	 * Cancels a scan of the project (MEMBER or above). Idempotent: cancelling a cancelled
+	 * scan returns it unchanged. A scan of another project, including one in another
+	 * organization, is reported as not found. A COMPLETED or FAILED scan cannot be
+	 * cancelled (409). Running workers stop at their next heartbeat.
+	 */
+	@PostMapping("/projects/{projectId}/scans/{scanId}/cancel")
+	ScanResponse cancel(@PathVariable("projectId") UUID projectId, @PathVariable("scanId") UUID scanId) {
+		requireOnProject(projectId, OrganizationPermission.CANCEL_SCAN);
+		if (!this.scanService.get(scanId).scan().getProjectId().equals(projectId)) {
+			throw new ResourceNotFoundException("Scan", scanId);
+		}
+		// The audited actor is the caller's server-side identity, never a request value.
+		UUID actor = this.identities.find(this.currentPrincipal.require())
+			.orElseThrow(() -> new ResourceNotFoundException("Scan", scanId))
+			.getId();
+		this.lifecycle.cancelScan(scanId, "user:" + actor);
+		return ScanResponse.from(this.scanService.get(scanId));
 	}
 
 	@GetMapping("/projects/{projectId}/scans")

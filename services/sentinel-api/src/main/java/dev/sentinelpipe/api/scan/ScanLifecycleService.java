@@ -10,52 +10,81 @@ import dev.sentinelpipe.api.scanjob.ScanJobRepository;
 import dev.sentinelpipe.api.scanjob.ScanJobStatus;
 import dev.sentinelpipe.api.scanjob.ScannerType;
 import java.time.Clock;
-import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
-import java.util.function.BiConsumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Internal, trusted lifecycle operations for scans and their jobs.
+ * Control-plane lifecycle operations on scans and their jobs.
  *
  * <p>
- * There is deliberately <b>no REST endpoint</b> for these operations. They will be driven
- * by trusted internal components (workers, policy evaluation) in later phases, behind
- * authenticated and integrity-checked channels.
+ * Execution state is owned by the database (Flyway V007, ADR-0007). This service only
+ * plans jobs (INSERT) and calls the lifecycle functions granted to the API's database
+ * role; it cannot write lifecycle columns directly. Worker-side transitions (claim,
+ * heartbeat, report) are not reachable from the API at all.
  *
  * <p>
- * Every operation first takes a row lock on the scan, so operations on one scan and its
- * jobs are serialized across application instances. Entity versions provide an
- * additional optimistic check.
+ * Every function locks the scan row before its jobs, so operations on one scan are
+ * serialized across application instances and workers.
  */
 @Service
 public class ScanLifecycleService {
 
 	static final String SCANNER_ALREADY_PLANNED = "scanner-already-planned";
 
+	static final String SCAN_NOT_CANCELLABLE = "scan-not-cancellable";
+
+	private static final Logger log = LoggerFactory.getLogger(ScanLifecycleService.class);
+
+	/** Result of a cancellation request; both outcomes leave the scan CANCELLED. */
+	public enum Cancellation {
+
+		CANCELLED, ALREADY_CANCELLED
+
+	}
+
 	private final ScanRepository scans;
 
 	private final ScanJobRepository scanJobs;
 
+	private final JdbcTemplate jdbc;
+
+	private final ExecutionProperties execution;
+
 	private final Clock clock;
 
-	ScanLifecycleService(ScanRepository scans, ScanJobRepository scanJobs, Clock clock) {
+	ScanLifecycleService(ScanRepository scans, ScanJobRepository scanJobs, JdbcTemplate jdbc,
+			ExecutionProperties execution, Clock clock) {
 		this.scans = scans;
 		this.scanJobs = scanJobs;
+		this.jdbc = jdbc;
+		this.execution = execution;
 		this.clock = clock;
 	}
 
-	/** Adds a scanner job to a scan that has not started yet. */
+	/**
+	 * Adds a scanner job to a scan that has not started yet. The scan row lock serializes
+	 * planning with worker claims.
+	 */
 	@Transactional
 	public ScanJob planJob(UUID scanId, ScannerType scannerType) {
-		Scan scan = lockScan(scanId);
+		Objects.requireNonNull(scannerType, "scannerType");
+		if (!this.execution.isPlannable(scannerType)) {
+			throw new DomainRuleViolationException(
+					"The FIXTURE scanner requires sentinel.execution.fixture-enabled=true");
+		}
+		Scan scan = this.scans.findByIdForUpdate(scanId)
+			.orElseThrow(() -> new ResourceNotFoundException("Scan", scanId));
 		if (scan.getExecutionStatus() != ScanExecutionStatus.QUEUED) {
 			throw new DomainRuleViolationException("Scanner jobs can only be planned while the scan is QUEUED");
 		}
-		ScanJob job = ScanJob.plan(scanId, scannerType, now());
+		ScanJob job = ScanJob.plan(scanId, scannerType, Timestamps.now(this.clock));
 		try {
 			return this.scanJobs.saveAndFlush(job);
 		}
@@ -67,104 +96,115 @@ public class ScanLifecycleService {
 		}
 	}
 
+	/**
+	 * Cancels a scan that has not reached a terminal state: the scan becomes CANCELLED with
+	 * decision INCOMPLETE and its unfinished jobs are cancelled. A worker executing one of
+	 * them is told on its next heartbeat and its report is rejected. Idempotent.
+	 * @param actor audited identity of the requester (never a client-supplied value)
+	 * @throws ConflictException if the scan already COMPLETED or FAILED
+	 */
 	@Transactional
-	public Scan startScan(UUID scanId) {
-		Scan scan = lockScan(scanId);
-		scan.start(now());
-		return scan;
+	public Cancellation cancelScan(UUID scanId, String actor) {
+		String outcome = call("SELECT lifecycle.cancel_scan(?, ?)", scanId, actor);
+		return switch (outcome) {
+			case "CANCELLED" -> {
+				log.info("scan.cancelled scan_id={}", scanId);
+				yield Cancellation.CANCELLED;
+			}
+			case "ALREADY_CANCELLED" -> Cancellation.ALREADY_CANCELLED;
+			case "NOT_CANCELLABLE" -> throw new ConflictException(SCAN_NOT_CANCELLABLE,
+					"The scan has already finished and cannot be cancelled.");
+			case "NOT_FOUND" -> throw new ResourceNotFoundException("Scan", scanId);
+			default -> throw unexpected(outcome);
+		};
+	}
+
+	/** Marks a non-terminal scan FAILED (decision INCOMPLETE) and cancels its unfinished jobs. */
+	@Transactional
+	public void failScan(UUID scanId) {
+		String outcome = call("SELECT lifecycle.fail_scan(?)", scanId);
+		switch (outcome) {
+			case "FAILED" -> log.info("scan.failed scan_id={}", scanId);
+			case "TERMINAL" -> throw new DomainRuleViolationException("A terminal scan cannot be failed");
+			case "NOT_FOUND" -> throw new ResourceNotFoundException("Scan", scanId);
+			default -> throw unexpected(outcome);
+		}
 	}
 
 	/**
-	 * Completes a running scan with a final security decision.
-	 *
-	 * <p>
-	 * Fail-closed rules: every job must be terminal, and {@link SecurityDecision#PASS} is
-	 * only accepted when at least one job exists and every job {@code COMPLETED}. A scan
-	 * with failed, cancelled or missing jobs may be {@code FAIL} or {@code INCOMPLETE},
-	 * never {@code PASS}.
+	 * Records the security decision of an EVALUATING scan. Fail closed: PASS requires every
+	 * job to have COMPLETED, and PASS or FAIL require reason {@code POLICY_EVALUATED}.
+	 * @throws DomainRuleViolationException if the scan is not EVALUATING or the decision is
+	 * not justified
 	 */
 	@Transactional
-	public Scan completeScan(UUID scanId, SecurityDecision decision) {
-		Scan scan = lockScan(scanId);
-		List<ScanJob> jobs = this.scanJobs.findByScanIdOrderByScannerTypeAsc(scanId);
-		if (jobs.stream().anyMatch((job) -> !job.getExecutionStatus().isTerminal())) {
-			throw new DomainRuleViolationException("All scan jobs must be terminal before the scan completes");
+	public void completeEvaluation(UUID scanId, SecurityDecision decision, DecisionReason reason) {
+		Objects.requireNonNull(decision, "decision");
+		Objects.requireNonNull(reason, "reason");
+		if (!decision.isFinal()) {
+			throw new DomainRuleViolationException("A completed scan requires a final security decision");
 		}
-		boolean allJobsCompleted = !jobs.isEmpty()
-				&& jobs.stream().allMatch((job) -> job.getExecutionStatus() == ScanJobStatus.COMPLETED);
-		if (decision == SecurityDecision.PASS && !allJobsCompleted) {
-			throw new DomainRuleViolationException(
+		if ((decision != SecurityDecision.INCOMPLETE) != (reason == DecisionReason.POLICY_EVALUATED)) {
+			throw new DomainRuleViolationException("PASS and FAIL require a policy evaluation");
+		}
+		String outcome = call("SELECT lifecycle.complete_evaluation(?, ?, ?)", scanId, decision.name(),
+				reason.name());
+		switch (outcome) {
+			case "COMPLETED" -> log.info("scan.completed scan_id={} decision={} reason={}", scanId, decision, reason);
+			case "NOT_EVALUATING" -> throw new DomainRuleViolationException("The scan is not EVALUATING");
+			case "REJECTED_PASS_NOT_JUSTIFIED" -> throw new DomainRuleViolationException(
 					"PASS requires at least one scan job and every scan job to have COMPLETED");
+			case "NOT_FOUND" -> throw new ResourceNotFoundException("Scan", scanId);
+			default -> throw unexpected(outcome);
 		}
-		scan.complete(decision, now());
-		return scan;
 	}
 
-	/** Marks the scan FAILED (decision INCOMPLETE) and cancels its unfinished jobs. */
+	/**
+	 * Evaluates an EVALUATING scan with the evaluation available in this version: no policy
+	 * engine exists yet (M4), so the decision is always INCOMPLETE, never PASS. Returns
+	 * {@code false} if the scan is no longer EVALUATING (evaluated concurrently).
+	 */
 	@Transactional
-	public Scan failScan(UUID scanId) {
-		return terminate(scanId, Scan::fail);
-	}
-
-	/** Marks the scan CANCELLED (decision INCOMPLETE) and cancels its unfinished jobs. */
-	@Transactional
-	public Scan cancelScan(UUID scanId) {
-		return terminate(scanId, Scan::cancel);
-	}
-
-	@Transactional
-	public ScanJob startJob(UUID jobId) {
-		return changeJob(jobId, true, ScanJob::start);
-	}
-
-	@Transactional
-	public ScanJob completeJob(UUID jobId) {
-		return changeJob(jobId, true, ScanJob::complete);
-	}
-
-	@Transactional
-	public ScanJob retryJob(UUID jobId) {
-		return changeJob(jobId, true, ScanJob::requeueForRetry);
-	}
-
-	@Transactional
-	public ScanJob failJob(UUID jobId) {
-		return changeJob(jobId, false, ScanJob::fail);
-	}
-
-	private Scan terminate(UUID scanId, BiConsumer<Scan, Instant> transition) {
-		Scan scan = lockScan(scanId);
-		Instant now = now();
-		transition.accept(scan, now);
-		for (ScanJob job : this.scanJobs.findByScanIdOrderByScannerTypeAsc(scanId)) {
-			if (!job.getExecutionStatus().isTerminal()) {
-				job.cancel(now);
-			}
+	public boolean evaluate(UUID scanId) {
+		List<ScanJobStatus> statuses = this.scanJobs.findByScanIdOrderByScannerTypeAsc(scanId)
+			.stream()
+			.map(ScanJob::getExecutionStatus)
+			.toList();
+		String outcome = call("SELECT lifecycle.complete_evaluation(?, ?, ?)", scanId,
+				SecurityDecision.INCOMPLETE.name(), reasonWithoutPolicyEngine(statuses).name());
+		if (outcome.equals("COMPLETED")) {
+			log.info("scan.evaluated scan_id={} decision=INCOMPLETE reason={}", scanId,
+					reasonWithoutPolicyEngine(statuses));
+			return true;
 		}
-		return scan;
-	}
-
-	private ScanJob changeJob(UUID jobId, boolean requireRunningScan, BiConsumer<ScanJob, Instant> transition) {
-		UUID scanId = this.scanJobs.findScanIdById(jobId)
-			.orElseThrow(() -> new ResourceNotFoundException("Scan job", jobId));
-		Scan scan = lockScan(scanId);
-		if (scan.getExecutionStatus().isTerminal()) {
-			throw new DomainRuleViolationException("Jobs of a terminal scan cannot change");
+		if (outcome.equals("NOT_EVALUATING") || outcome.equals("NOT_FOUND")) {
+			return false;
 		}
-		if (requireRunningScan && scan.getExecutionStatus() != ScanExecutionStatus.RUNNING) {
-			throw new DomainRuleViolationException("The scan must be RUNNING for this job transition");
+		throw unexpected(outcome);
+	}
+
+	/**
+	 * Explains the INCOMPLETE decision of a scan evaluated without a policy engine. A scan
+	 * whose jobs all completed still lacks a policy evaluation; one with a failed or
+	 * cancelled job also lacks evidence.
+	 */
+	static DecisionReason reasonWithoutPolicyEngine(List<ScanJobStatus> jobStatuses) {
+		boolean allCompleted = !jobStatuses.isEmpty()
+				&& jobStatuses.stream().allMatch((status) -> status == ScanJobStatus.COMPLETED);
+		return allCompleted ? DecisionReason.POLICY_EVALUATION_UNAVAILABLE
+				: DecisionReason.SCANNER_EXECUTION_INCOMPLETE;
+	}
+
+	private String call(String sql, Object... arguments) {
+		String outcome = this.jdbc.queryForObject(sql, String.class, arguments);
+		if (outcome == null) {
+			throw unexpected("null");
 		}
-		ScanJob job = this.scanJobs.findById(jobId).orElseThrow(() -> new ResourceNotFoundException("Scan job", jobId));
-		transition.accept(job, now());
-		return job;
+		return outcome;
 	}
 
-	private Scan lockScan(UUID scanId) {
-		return this.scans.findByIdForUpdate(scanId).orElseThrow(() -> new ResourceNotFoundException("Scan", scanId));
-	}
-
-	private Instant now() {
-		return Timestamps.now(this.clock);
+	private static IllegalStateException unexpected(String outcome) {
+		return new IllegalStateException("Unexpected lifecycle function outcome: " + outcome);
 	}
 
 }

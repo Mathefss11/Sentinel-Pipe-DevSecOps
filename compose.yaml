@@ -16,14 +16,16 @@ services:
     image: postgres:18.6-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
     environment:
       POSTGRES_DB: ${SENTINEL_DB_NAME:-sentinelpipe}
-      POSTGRES_USER: ${SENTINEL_DB_USERNAME:-sentinel}
-      POSTGRES_PASSWORD: ${SENTINEL_DB_PASSWORD:?SENTINEL_DB_PASSWORD must be set (see .env.example)}
+      # Cluster administrator: provisioning only (provision-roles.sh), never a service. The
+      # API, Flyway, worker and operator use the least-privileged logins it creates.
+      POSTGRES_USER: ${SENTINEL_DB_ADMIN_USERNAME:-sentinel}
+      POSTGRES_PASSWORD: ${SENTINEL_DB_ADMIN_PASSWORD:?SENTINEL_DB_ADMIN_PASSWORD must be set (see .env.example)}
     ports:
       - "127.0.0.1:${SENTINEL_DB_PORT:-5432}:5432"
     volumes:
       # PostgreSQL 18+ images keep PGDATA in a major-version subdirectory of /var/lib/postgresql.
       - postgres-data:/var/lib/postgresql
-      # Login-role provisioning script (provision-roles.sh); read-only, no secrets.
+      # Role and ownership provisioning script (provision-roles.sh); read-only, no secrets.
       - ./infrastructure/docker/postgres:/etc/sentinelpipe/postgres:ro
     security_opt:
       - no-new-privileges:true

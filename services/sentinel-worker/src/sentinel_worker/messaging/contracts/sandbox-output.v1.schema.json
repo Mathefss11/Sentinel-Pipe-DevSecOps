@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/messages/v1/sandbox-output.v1.schema.json",
+  "title": "Sandbox output v1",
+  "description": "The only channel from a sandboxed scanner process to the worker: one JSON object written to stdout (ADR-0009). Artifacts are transferred as data with restricted identifier names, never as file paths, so path traversal, symlinks and access to other jobs' files cannot occur. The worker also enforces a byte limit on stdout (2 MiB by default), rejects duplicate keys and names, decodes base64 strictly, and treats everything here as untrusted. Evidence digests are computed later by the control plane (ADR-0008).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "artifacts"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "media_type", "content_base64"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^(?!.*\\.\\.)[a-z0-9][a-z0-9._-]{0,63}$" },
+          "media_type": { "type": "string", "enum": ["application/json", "application/sarif+json", "text/plain"] },
+          "content_base64": {
+            "description": "Standard base64 of at most 1 MiB of content.",
+            "type": "string",
+            "maxLength": 1398104,
+            "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "artifacts": [
+        { "name": "fixture-result.json", "media_type": "application/json", "content_base64": "eyJvayI6dHJ1ZX0=" }
+      ]
+    }
+  ]
+}

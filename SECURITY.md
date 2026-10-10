@@ -58,8 +58,8 @@ The current version implements the following controls:
   component details; every other request is denied. The domain API (`/api/v1`) is
   registered only when `sentinel.domain-api.enabled=true`. Startup then fails unless the
   identity settings are complete, `server.address` is a literal loopback IP and no
-  `prod`/`production` profile is active (ADR-0002, ADR-0003). There is no public endpoint
-  that changes scan or job state.
+  `prod`/`production` profile is active (ADR-0002, ADR-0003). The only endpoint that
+  changes scan state is the tenant-checked, audited cancellation (MEMBER and above).
 - **Authentication:** OAuth 2.0 Resource Server. Access tokens from an external OIDC
   provider must be JWS-signed with an allow-listed asymmetric algorithm, carry an
   allow-listed `typ` (`at+jwt` by default), the exact configured issuer, the configured
@@ -78,8 +78,35 @@ The current version implements the following controls:
   RFC 9457 Problem Details without stack traces, exception names, SQL or echoed input
   values.
 - **Fail-closed scan state:** failed or cancelled scans are always `INCOMPLETE`, and `PASS`
-  requires every scanner job to have completed. These invariants are enforced in code and
-  by PostgreSQL CHECK constraints.
+  requires every scanner job to have completed **and** a policy evaluation, which does not
+  exist yet, so completed scans are `INCOMPLETE` with a recorded reason. Execution status
+  and security decision are separate. These invariants are enforced by PostgreSQL
+  lifecycle functions and CHECK constraints (ADR-0007).
+- **Execution protocol:** workers claim jobs through `SECURITY DEFINER` functions only,
+  authenticated by their own database login, a random lease token (stored only as
+  SHA-256) and a monotonic fencing epoch. Stale, forged, stolen or cross-tenant reports
+  change nothing and are recorded in an append-only audit trail; duplicate reports are
+  idempotent. Leases expire after 60 s without heartbeats, jobs have at most 3 attempts,
+  and scans a 15-minute hard deadline. Retry decisions belong to the control plane.
+  Identifiers in queue messages are never used: workers act only on the authoritative
+  context returned by the claim. The API's database login cannot write execution state
+  directly.
+- **Result integrity and evidence:** results are versioned `job-result.v1` documents
+  (16 KiB, canonical JSON). PostgreSQL validates each one in a single transaction against
+  the lease and the authoritative job, scan, project, organization and commit. Evidence
+  digests are computed by the database from the uploaded bytes; worker-supplied digests
+  are never accepted on their own. Evidence is content-addressed per organization, bound
+  to the uploading lease, immutable (a CHECK constraint recomputes the digest) and
+  re-verified on read. Artifact names are restricted identifiers, never paths or URLs.
+  Repeated refused submissions are deduplicated in the audit trail (ADR-0008).
+- **Execution sandbox:** every job attempt runs in a fresh container with no network, a
+  read-only root, a noexec size-limited `/tmp`, user 65534, all capabilities dropped,
+  no-new-privileges, seccomp, and PID, memory, CPU, output and time limits. There is no
+  Docker socket, mount, host environment or credential inside, and images are digest-pinned
+  and never pulled at run time. Cancellation, lease loss and timeouts kill the container,
+  which is always removed. Output is data only (no paths), strictly parsed and bounded.
+  The controls are verified from inside a sandbox by `sentinel-worker sandbox-check` and in
+  CI (ADR-0009).
 - **Messaging:** scan requests reach the worker through a transactional outbox and RabbitMQ
   (ADR-0004). Events are built from committed server-side state and contain no tokens,
   credentials or user identities. The worker treats messages as untrusted input: bounded
@@ -96,9 +123,11 @@ The current version implements the following controls:
   (write `sentinel.scan-requests` only). The worker can only read its queue and write the
   retry and dead-letter exchanges. No runtime user can configure topology or use the
   management interface; topology is provisioned separately by an administrator. In
-  PostgreSQL, the worker role may only execute `worker.record_receipt` and the operator
-  role only the `ops.*` recovery functions. Both are `SECURITY DEFINER` functions with a
-  fixed `search_path`, and `EXECUTE` is revoked from `PUBLIC`.
+  PostgreSQL, the worker role may only execute `worker.record_receipt` and the execution
+  protocol functions (`worker.claim_job`, `heartbeat_job`, `put_evidence`, `submit_result`), and the operator
+  role only the `ops.*` recovery functions. All are `SECURITY DEFINER` functions with a
+  fixed `search_path`, and `EXECUTE` is revoked from `PUBLIC`, including by default for
+  future functions of the owner role.
 - **Recovery:** operator actions (requeue FAILED outbox events, dead-letter replay) are CLI
   commands with separate operator credentials, bounded to 100 items per call and audited
   in `ops.recovery_actions` before they take effect. There are no recovery HTTP endpoints.
@@ -126,10 +155,30 @@ The current version implements the following controls:
 - RabbitMQ authorizes `queue.purge` with the read permission: the worker can purge its
   work queue and the operator the dead-letter queue. The outbox remains the system of
   record for recovery.
-- The API connects to PostgreSQL as the schema owner (the Compose superuser locally), and
-  `SECURITY DEFINER` functions run as the migration owner. Separate runtime and migration
-  roles are still to be introduced. **This is a blocker before real scanner execution
-  (M3).**
+- Database identities are separated (ADR-0006): the API runtime login has DML on its own
+  tables only, Flyway uses a migrator login that switches to the non-superuser
+  `sentinel_owner`, and definer functions run as that owner. If Flyway runs inside the API
+  process, the process holds the migration credentials at startup; production-like
+  deployments should migrate in a separate step (`SPRING_FLYWAY_ENABLED=false` for the
+  API).
+- A worker that legitimately holds a lease can report a false outcome or upload false
+  evidence for that job. The evidence is integrity-checked and attributable, but how it
+  was produced is not attested yet (planned for M6).
+  An API compromise can cancel or fail scans and record an evaluation for an EVALUATING
+  scan. It cannot complete jobs or skip execution, and `PASS` still requires every job to
+  have completed.
+- **Trust policy (ADR-0009):**
+  - Docker/runc may run only controlled fixtures and explicitly trusted scanners.
+  - Arbitrary untrusted repository code never runs under runc; the sandbox policy refuses
+    it without a hardened runtime.
+  - Disposable VMs or validated gVisor/Kata deployments are required before untrusted
+    code is enabled.
+  - Repository content is always untrusted input, even for trusted scanners.
+- No untrusted repository content is fetched or executed yet; only a harmless fixture
+  runs in the sandbox. With the default runc runtime the sandbox shares the host kernel and
+  is not a sufficient boundary against kernel or runtime exploits. A stronger runtime
+  (gVisor, Kata) or per-job VMs must be chosen before untrusted code runs, and worker hosts,
+  whose Docker access is root-equivalent, must be dedicated (ADR-0009, threat model).
 - Dead-letter replay audit is enforced by the operator CLI, not by the broker: the
   operator's broker credentials alone can republish or discard dead letters without an
   audit row. Workers still verify and deduplicate every message.

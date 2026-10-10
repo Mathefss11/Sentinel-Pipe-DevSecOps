@@ -40,7 +40,9 @@ import tools.jackson.databind.json.JsonMapper;
 		// Outbox publication is driven explicitly by tests for deterministic results.
 		"sentinel.messaging.outbox.publisher-enabled=false",
 		// Administrative test broker user; deployments provision topology out of band.
-		"sentinel.messaging.declare-topology=true" })
+		"sentinel.messaging.declare-topology=true",
+		// The harmless FIXTURE scanner may be planned; supervisor passes are driven by tests.
+		"sentinel.execution.fixture-enabled=true", "sentinel.execution.supervisor.enabled=false" })
 @Import(TestcontainersConfiguration.class)
 public abstract class AbstractDomainApiIntegrationTest {
 
@@ -55,8 +57,16 @@ public abstract class AbstractDomainApiIntegrationTest {
 	@Autowired
 	protected JsonMapper jsonMapper;
 
-	@Autowired
+	/**
+	 * Superuser connection for test fixtures and assertions ({@link TestDatabaseAdmin}). The
+	 * application itself runs as the least-privileged API login.
+	 */
 	protected JdbcTemplate jdbcTemplate;
+
+	@Autowired
+	void setDatabaseAdmin(TestDatabaseAdmin admin) {
+		this.jdbcTemplate = admin.jdbc();
+	}
 
 	/** Authenticated as {@link TestJwts#PLATFORM_ADMIN} unless a request sets its own token. */
 	protected MockMvc mockMvc;

@@ -7,16 +7,18 @@ import java.util.Set;
  * Execution status of one scanner job.
  *
  * <pre>
- * QUEUED ──start──▶ RUNNING ──complete──▶ COMPLETED
- *   │  ▲              │
- *   │  └──retry───────┤ (bounded by {@link ScanJob#MAX_ATTEMPTS})
- *   │                 ├──fail──▶ FAILED
- *   ├──fail───────────┼─────────▶ FAILED
- *   └──cancel─────────┴─cancel─▶ CANCELLED
+ * QUEUED ──claim (lease)──▶ RUNNING ──report COMPLETED──▶ COMPLETED
+ *   │  ▲                      │
+ *   │  └──retry───────────────┤ retryable failure or expired lease, while attempts
+ *   │                         │ remain (bounded by {@link ScanJob#MAX_ATTEMPTS})
+ *   │                         ├──final failure / deadline──▶ FAILED
+ *   ├──deadline───────────────┼──────────────────────────────▶ FAILED
+ *   └──cancel─────────────────┴─cancel───────────────────────▶ CANCELLED
  * </pre>
  *
- * COMPLETED means the scanner ran to completion and produced its output. It says nothing
- * about whether vulnerabilities were found.
+ * The transitions are performed by the database execution protocol (Flyway V007,
+ * ADR-0007); this matrix documents them. COMPLETED means the scanner ran to completion and
+ * produced its output. It says nothing about whether vulnerabilities were found.
  */
 public enum ScanJobStatus {
 

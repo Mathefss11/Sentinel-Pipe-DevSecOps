@@ -7,13 +7,16 @@ against versioned security policies, and publish actionable remediation reports 
 It is also a cybersecurity engineering portfolio project. The emphasis is on secure design,
 verifiable behavior, and honest reporting of coverage and limitations.
 
-> **Status: Milestone 2, Phase 2C (Distributed reliability, hardening & observability).**
+> **Status: Milestone 3, Phase 1 in progress (secure scan execution foundation).**
 > The control plane registers organizations and GitHub-hosted projects, accepts
 > authenticated and authorized scan requests for specific commits, and delivers them
 > reliably to any number of Python workers through a transactional outbox and RabbitMQ.
 > Workers share one PostgreSQL receipt store that accepts a message only if it matches
 > the committed outbox event and its tenant relationships. All runtime identities are
-> least-privileged. **No scanner is executed yet**, and policy
+> least-privileged, including separate database owner, migration, API, worker and operator
+> roles. Workers execute jobs under fenced, database-enforced leases with heartbeats,
+> bounded retries, a hard deadline and cancellation. **No real scanner is executed yet**
+> (only a harmless fixture), and policy
 > evaluation and GitHub integration are not implemented. The domain API is still
 > restricted to loopback, development-stage use (see
 > [Security limitations](#current-security-limitations)).
@@ -71,28 +74,35 @@ Organization 1 ──── * Project 1 ──── * Scan 1 ──── * Sca
 | `Organization` | Unique, immutable `slug` (`^[a-z0-9]+(-[a-z0-9]+)*$`, ≤ 63). Display names are trimmed and may not contain control characters. |
 | `Project` | Belongs to exactly one organization. Identified by provider (`GITHUB`), owner and repository name, normalized to lowercase. URLs are never accepted. A repository can be registered once per organization. Nothing is cloned or executed. |
 | `Scan` | Requested for a **full** commit SHA (40 or 64 hex characters) and a branch. `executionStatus` and `securityDecision` are independent dimensions. |
-| `ScanJob` | One scanner execution per scanner type per scan, with a bounded attempt count (max. 3). No scanner is executed yet. |
+| `ScanJob` | One scanner execution per scanner type per scan. Executed by workers under fenced, time-bound leases, with at most 3 attempts. Only the harmless `FIXTURE` executor exists; no real scanner runs yet. |
 
-**Scan lifecycle** (enforced in the entity and by database CHECK constraints):
+**Scan lifecycle** (enforced by PostgreSQL lifecycle functions and CHECK constraints;
+see [execution lifecycle](docs/architecture/execution-lifecycle.md)):
 
 ```text
-QUEUED ──▶ RUNNING ──▶ COMPLETED   (decision: PASS | FAIL | INCOMPLETE)
-  │           │
-  ├───────────┴──────▶ FAILED      (decision: always INCOMPLETE)
-  └───────────┴──────▶ CANCELLED   (decision: always INCOMPLETE)
+QUEUED ──▶ RUNNING ──▶ EVALUATING ──▶ COMPLETED   (decision: PASS | FAIL | INCOMPLETE)
+  │           │             │
+  ├───────────┴─────────────┴──────▶ FAILED      (decision: always INCOMPLETE)
+  └───────────┴─────────────┴──────▶ CANCELLED   (decision: always INCOMPLETE)
 ```
 
-- The decision is `PENDING` while the scan is `QUEUED` or `RUNNING`.
+- The decision is `PENDING` until execution is terminal. Every final decision carries a
+  `decisionReason`.
+- A scan becomes RUNNING when a worker claims its first job, and must finish within its
+  hard deadline (15 minutes by default). When every job is terminal it becomes
+  EVALUATING; the control plane then records the decision.
+- Completing execution never implies `PASS`. `PASS` requires every job `COMPLETED` **and**
+  a policy evaluation. No policy engine exists before M4, so completed scans are
+  `INCOMPLETE` with reason `POLICY_EVALUATION_UNAVAILABLE` (fail closed).
 - Terminal scans cannot change.
-- Completing execution never implies `PASS`. `PASS` is rejected unless the scan has at
-  least one job and every job `COMPLETED` (fail closed).
-- Transitions are performed only by the internal `ScanLifecycleService`. **There is no
-  public endpoint that changes scan or job state.** Trusted internal components will drive
-  transitions in later phases.
-
-> CLAUDE.md also lists `PLANNING` and `EVALUATING` stages. This phase implements the
-> reduced status set requested for M2 Phase 1. Adding those stages later needs a new
-> migration that extends the CHECK constraints.
+- Workers claim jobs with leases (token, fencing epoch, 60 s expiry, heartbeats every
+  15 s) through database functions only; stale, forged or cross-tenant results are
+  rejected and audited ([ADR-0007](docs/adr/0007-database-authoritative-execution-leases.md)).
+- The only user-facing transition is cancellation
+  (`POST /api/v1/projects/{projectId}/scans/{scanId}/cancel`, MEMBER and above). No
+  endpoint can claim, complete or evaluate a scan.
+- There is no separate `PLANNING` state yet: jobs are planned in the transaction that
+  creates the scan.
 
 ## Repository layout
 
@@ -187,14 +197,19 @@ On startup, Flyway applies pending migrations from
 Invoke-RestMethod http://127.0.0.1:8080/actuator/health
 ```
 
-The application deliberately refuses to start if `SENTINEL_DB_PASSWORD` or
-`SENTINEL_RABBITMQ_PASSWORD` is missing.
+The application deliberately refuses to start if `SENTINEL_DB_PASSWORD` (runtime login),
+`SENTINEL_DB_MIGRATION_PASSWORD` (Flyway login) or `SENTINEL_RABBITMQ_PASSWORD` is missing.
+Neither database login is the Compose superuser: both are created by the provisioning
+script below ([database roles runbook](docs/runbooks/database-roles.md)). Installations
+created before Milestone 3 must follow the
+[upgrade procedure](docs/runbooks/database-roles.md#3-upgrading-an-installation-created-before-v006)
+before starting this version.
 
 The API publishes with the least-privileged `sentinel-publisher` broker user and does not
 declare the broker topology. Provision the topology and all runtime identities once,
 right after the stack is up and **before** starting the API or a worker (otherwise the
-API's publishes fail until the topology exists). The scripts work before or after the
-Flyway migrations:
+API's publishes fail until the topology exists, and Flyway cannot log in until the
+database roles exist):
 
 ```powershell
 .\scripts\dev\provision.ps1        # see docs/runbooks/messaging.md, section 2
@@ -314,6 +329,7 @@ Invoke-RestMethod "$api/projects/$($project.id)/scans?page=0&size=20" -Headers $
 | `GET` | `/api/v1/organizations/{organizationId}/projects?page&size` | `200` (oldest first) | VIEWER |
 | `GET` | `/api/v1/projects/{projectId}` | `200` | VIEWER |
 | `POST` | `/api/v1/projects/{projectId}/scans` | `202` + `Location`, optional `Idempotency-Key` | MEMBER |
+| `POST` | `/api/v1/projects/{projectId}/scans/{scanId}/cancel` | `200` (idempotent), `409` if finished | MEMBER |
 | `GET` | `/api/v1/projects/{projectId}/scans?page&size` | `200` (newest first) | VIEWER |
 | `GET` | `/api/v1/scans/{scanId}` | `200` (includes jobs) | VIEWER |
 
@@ -369,6 +385,14 @@ load `.env` into the session (as for the API), then:
 .\.venv\Scripts\sentinel-worker.exe consume --idle-timeout 30
 ```
 
+To execute claimed jobs (development and CI only: only the harmless `FIXTURE` executor
+exists), see the [execution runbook](docs/runbooks/execution.md):
+
+```powershell
+$env:SENTINEL_WORKER_FIXTURE_ENABLED = "true"
+.\.venv\Scripts\sentinel-worker.exe execute --idle-timeout 60
+```
+
 | Variable | Purpose |
 |---|---|
 | `SENTINEL_WORKER_RABBITMQ_HOST` / `_PORT` / `_VHOST` | Broker address (defaults `localhost`, `5672`, `/`) |
@@ -379,6 +403,9 @@ load `.env` into the session (as for the API), then:
 | `SENTINEL_WORKER_DB_SSLMODE` | libpq `sslmode`; `production` requires `verify-ca` or `verify-full` |
 | `SENTINEL_WORKER_METRICS_PORT` / `_ADDRESS` | Optional Prometheus exposition, loopback only (off by default) |
 | `SENTINEL_WORKER_PREFETCH` | Unacknowledged messages in flight, 1–50 (default 1) |
+| `SENTINEL_WORKER_FIXTURE_ENABLED` / `_SECONDS` / `_MODE` | `execute`: enable the harmless FIXTURE executor (refused in `production`), its duration and test mode |
+| `SENTINEL_WORKER_FIXTURE_EXECUTOR`, `SENTINEL_WORKER_SANDBOX_*`, `SENTINEL_WORKER_DOCKER_CLI` | Sandbox (default) or inline execution, sandbox limits and runtime ([execution runbook](docs/runbooks/execution.md#5-sandboxes)) |
+| `SENTINEL_WORKER_EXECUTION_POLL_SECONDS` | `execute`: delay between claim attempts when idle (default 5) |
 
 Operator recovery commands (`outbox-summary`, `outbox-list-failed`,
 `outbox-requeue-failed`, `dlq-depth`, `dlq-replay`) use separate `SENTINEL_OPERATOR_*`
@@ -436,7 +463,8 @@ Details: [ADR-0004](docs/adr/0004-transactional-outbox-and-at-least-once-messagi
 | Worker lint | `.\.venv\Scripts\ruff.exe check .` | — |
 | Worker formatting | `.\.venv\Scripts\ruff.exe format --check .` | — |
 | Worker unit tests | `.\.venv\Scripts\python.exe -m pytest -m "not integration"` | — |
-| Worker tests incl. RabbitMQ and PostgreSQL integration | `.\.venv\Scripts\python.exe -m pytest` | Docker (Testcontainers) |
+| Worker tests incl. RabbitMQ and PostgreSQL integration | `.\.venv\Scripts\python.exe -m pytest` | Docker (Testcontainers); sandbox tests also need the pinned sandbox image (skipped otherwise) |
+| Sandbox isolation only | `.\.venv\Scripts\python.exe -m pytest -m sandbox` and `sentinel-worker sandbox-check` | Docker, sandbox image |
 | End to end: API → outbox → RabbitMQ → real worker | `.\mvnw.cmd verify -Pe2e "-Dsentinel.e2e.python=..\sentinel-worker\.venv\Scripts\python.exe"` (`services/sentinel-api`) | Docker, worker installed |
 | Compose configuration | `docker compose --env-file .env.example config --quiet` (repository root) | Docker |
 | OPA authorization policy | `docker run --rm -v "${PWD}\infrastructure\docker\opa:/policies:ro" openpolicyagent/opa:1.21.1 test /policies -v` | Docker |
@@ -449,7 +477,7 @@ a test-only RSA key pair generated in memory at test start; no private key is st
 the repository. The tests verify that:
 
 - the application context starts against real PostgreSQL and RabbitMQ;
-- Flyway applies `V001`–`V004` to a fresh database with valid checksums and no pending
+- Flyway applies `V001`–`V007` to a fresh database with valid checksums and no pending
   migrations. Hibernate only validates the schema and creates no tables;
 - a scan and its outbox event commit or roll back together; replays and concurrent
   retries create exactly one event; events carry the project's organization;
@@ -472,8 +500,20 @@ the repository. The tests verify that:
   self-modification are rejected; concurrent mutual demotion of two OWNERs leaves one;
 - organizations, projects and scans follow their validation, uniqueness, normalization,
   pagination and Problem Details rules;
-- scan and job state machines reject invalid and terminal-state transitions, and `PASS`
-  is rejected without completed jobs;
+- the execution protocol (V007) against real PostgreSQL: exactly one claim per job
+  under concurrent workers; heartbeats, lease expiry, bounded retries with backoff and
+  the hard deadline; stale epochs, forged tokens, stolen tokens used by another worker
+  login and cross-tenant reports are rejected and audited; duplicate reports are
+  idempotent and contradictory ones refused; cancellation races; concurrent supervisors;
+  `PASS` is impossible without completed jobs and a policy evaluation;
+- result integrity (V008): job-result.v1 documents validated by PostgreSQL and the
+  contract; evidence digests computed by the database; forged digests, modified bytes,
+  missing artifacts and cross-tenant or cross-attempt evidence substitution are rejected;
+  oversized and malformed payloads are refused without being echoed; repeated rejections
+  are deduplicated; retention purges content but keeps digests; tokens and evidence never
+  reach audit records, logs or metrics;
+- the API's database login cannot write lifecycle columns, the audit trail or call the
+  worker functions; the worker login can reach nothing but its four functions;
 - PostgreSQL CHECK, UNIQUE and FOREIGN KEY constraints reject inconsistent rows written
   directly with SQL;
 - idempotent scan creation is safe under concurrent retries and conflicting reuse;
@@ -578,6 +618,23 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 - [x] Concurrency, fault-injection, permission and end-to-end tests against real
   PostgreSQL and RabbitMQ; ADR-0005 and runbooks
 
+## Milestone 3, Phase 1 progress
+
+- [x] Slice 1 — database privilege separation: non-superuser owner, separate migrator,
+  least-privileged API, worker and operator logins, safe upgrade path (V006, ADR-0006)
+- [x] Slice 2 — execution lifecycle: fenced job leases, heartbeats, supervisor recovery,
+  bounded retries, 15-minute hard deadline, EVALUATING with fail-closed decisions,
+  audited cancellation endpoint, append-only execution audit trail (V007, ADR-0007,
+  accepted)
+- [x] Slice 3 — result integrity: `job-result.v1` contract, evidence digests computed and
+  enforced by PostgreSQL, tenant- and lease-scoped evidence, retention, bounded rejection
+  audit, execution metrics (V008, ADR-0008)
+- [x] Slice 4 — isolated, ephemeral sandbox: hardened single-use containers (no network,
+  read-only root, non-root, no capabilities, PID, memory, CPU and time limits), cancellation
+  and lease loss kill the sandbox, crash reaping, data-only output channel, deterministic
+  fixture modes, `sandbox-check`, CI sandbox job (ADR-0009, threat model)
+- [ ] Slice 5 — threat model, adversarial tests and CI sandbox job
+
 ## Architecture decisions
 
 - [ADR-0001: Modular monolith control plane](docs/adr/0001-modular-monolith-control-plane.md)
@@ -585,6 +642,11 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 - [ADR-0003: External OIDC identity and membership-based tenant authorization](docs/adr/0003-identity-and-tenant-authorization.md)
 - [ADR-0004: Transactional outbox and at-least-once messaging](docs/adr/0004-transactional-outbox-and-at-least-once-messaging.md)
 - [ADR-0005: Shared worker receipts, database-verified messages and least-privilege runtime identities](docs/adr/0005-shared-receipts-tenant-verification-and-least-privilege.md)
+- [ADR-0006: Database privilege separation](docs/adr/0006-database-privilege-separation.md)
+- [ADR-0007: Database-authoritative execution lifecycle with fenced leases](docs/adr/0007-database-authoritative-execution-leases.md)
+- [ADR-0008: Result integrity, evidence storage and execution observability](docs/adr/0008-result-integrity-and-evidence.md)
+- [ADR-0009: Isolated, ephemeral sandbox execution](docs/adr/0009-isolated-ephemeral-sandbox-execution.md)
+  ([threat model](docs/threat-model/execution-sandbox.md))
 
 ## Current security limitations
 
@@ -603,12 +665,30 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   `event_id` across all workers.
 - RabbitMQ lets an identity that may read a queue also purge it (worker: work queue;
   operator: dead-letter queue). The outbox remains the system of record.
-- The API connects to PostgreSQL as the schema owner; separate runtime and migration
-  roles are future work.
+- The API connects to PostgreSQL with a least-privileged runtime login; Flyway uses a
+  separate migrator login that switches to the non-superuser owner role
+  ([ADR-0006](docs/adr/0006-database-privilege-separation.md)). When Flyway runs inside
+  the API process, that process holds the migration credentials at startup; deployments
+  should migrate in a separate step.
 - `triggerType` and `branch` are supplied by the caller and not yet verified against
   GitHub events or Actions OIDC claims. There is no rate limiting.
-- No scanner runs, so no real security decision is produced yet. `PASS`/`FAIL` can only
-  be set by internal code paths, which are exercised by tests.
+- No real scanner runs (only the harmless `FIXTURE` executor) and there is no policy
+  engine, so no scan can reach `PASS` or `FAIL`; completed scans are `INCOMPLETE`.
+  Untrusted repository content is not fetched or executed anywhere yet.
+- The sandbox uses Docker with the default runc runtime, which shares the host kernel. It
+  enforces namespaces, cgroup limits, seccomp, no capabilities and no network, but it is
+  not a sufficient boundary for hostile code that attacks the kernel. Trust policy:
+  - runc is used only for controlled fixtures and explicitly trusted scanners;
+  - untrusted repository code requires disposable VMs or a validated gVisor/Kata
+    deployment, and is refused by the sandbox policy under runc;
+  - repository content is always untrusted input (ADR-0009).
+- A worker that legitimately holds a lease can still report a false outcome, or upload
+  false evidence, for that job. Results are bound to evidence whose digests PostgreSQL
+  computed, so they cannot affect other jobs or tenants. Proof of how the evidence was
+  produced (attestation, provenance) is future work (ADR-0008).
+- Evidence is stored in PostgreSQL (1 MiB per artifact, 8 MiB per lease). This suits the
+  harmless fixture and small artifacts; real scanner output will need the S3-compatible
+  backend behind the same `EvidenceStore` interface.
 
 ## Roadmap
 
@@ -616,7 +696,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 |---|---|
 | M1 — Foundation | Complete |
 | **M2 — Domain & Contracts** | Phases 1, 2A, 2B and 2C complete (see checklists) |
-| M3 — Scanners | Discovery, Semgrep/Gitleaks/Trivy adapters, normalized findings, correlation |
+| **M3 — Scanners** | Phase 1 in progress: database privilege separation and the execution lifecycle (leases, supervisor, cancellation) done; worker results, sandbox and scanners next |
 | M4 — Security Gate & Remediation | OPA policies, coverage, exceptions, decisions, remediation reports |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |
 | M6 — Advanced Security | Checkov, Syft/SBOM, ZAP, attestation, isolated staging |

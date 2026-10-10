@@ -62,8 +62,8 @@ this phase does not implement.
 
 | Identity | RabbitMQ configure / write / read | PostgreSQL |
 |---|---|---|
-| `sentinel-publisher` (API) | `^$` / `^sentinel\.scan-requests$` / `^$` | API uses the schema owner (see §10) |
-| `sentinel-worker` | `^$` / `^sentinel\.scan-requests\.(dlx\|retry)$` / `^sentinel\.scan-requests\.worker$` | `sentinel_worker_app` ∈ `sentinel_worker`: EXECUTE `worker.record_receipt` only |
+| `sentinel-publisher` (API) | `^$` / `^sentinel\.scan-requests$` / `^$` | `sentinel_api_app` ∈ `sentinel_api`: DML on control-plane tables ([database roles runbook](database-roles.md)) |
+| `sentinel-worker` | `^$` / `^sentinel\.scan-requests\.(dlx\|retry)$` / `^sentinel\.scan-requests\.worker$` | `sentinel_worker_app` ∈ `sentinel_worker`: EXECUTE `worker.record_receipt` and the execution protocol functions only |
 | `sentinel-operator` (on-call only) | `^$` / `^sentinel\.scan-requests$` / `^sentinel\.scan-requests\.dead-letter$` | `sentinel_operator_app` ∈ `sentinel_operator`: EXECUTE `ops.*` only |
 | Broker admin (`SENTINEL_RABBITMQ_ADMIN_*`) | provisioning only | — |
 
@@ -229,12 +229,9 @@ takeover, consumer crash after commit, and replays.
   record (purged work can be re-published by requeueing outbox events).
 - **Queue depths** are not visible to the least-privileged API identity; use the broker's
   Prometheus metrics.
-- **The API still connects to PostgreSQL as the schema owner** (the Compose superuser
-  locally), and `SECURITY DEFINER` functions run as the migration owner. A compromise of
-  the API process therefore yields full control of the database, including receipts and
-  audit rows. **This blocks real scanner execution (M3):** before scanners run, the API
-  needs a separate runtime role (DML on its own tables only), and migrations and the
-  definer functions need a dedicated non-superuser owner.
+- **Database privilege separation** is in place since M3 Phase 1
+  ([ADR-0006](../adr/0006-database-privilege-separation.md)): the API cannot read or alter
+  receipts, rejections or recovery audit rows, and cannot rewrite outbox payloads.
 - **Audit is enforced by the tools, not by the broker.** The operator's broker
   credentials alone allow publishing to `sentinel.scan-requests`, consuming from or
   purging the dead-letter queue without an `ops.recovery_actions` row. Deduplication

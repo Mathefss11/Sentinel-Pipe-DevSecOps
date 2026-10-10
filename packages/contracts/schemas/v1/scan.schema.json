@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sentinelpipe.dev/schemas/v1/scan.schema.json",
   "title": "Scan",
-  "description": "A security analysis request for one commit. executionStatus and securityDecision are independent: a COMPLETED scan may be FAIL or INCOMPLETE, and FAILED or CANCELLED scans are always INCOMPLETE.",
+  "description": "A security analysis request for one commit. executionStatus and securityDecision are independent: a COMPLETED scan may be FAIL or INCOMPLETE, and FAILED or CANCELLED scans are always INCOMPLETE. decisionReason explains every final decision; PASS and FAIL require a policy evaluation.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -13,8 +13,10 @@
     "triggerType",
     "executionStatus",
     "securityDecision",
+    "decisionReason",
     "requestedAt",
     "startedAt",
+    "deadlineAt",
     "completedAt",
     "jobs"
   ],
@@ -26,18 +28,40 @@
     "triggerType": { "type": "string", "enum": ["MANUAL", "PUSH", "PULL_REQUEST", "SCHEDULED"] },
     "executionStatus": {
       "type": "string",
-      "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
+      "enum": ["QUEUED", "RUNNING", "EVALUATING", "COMPLETED", "FAILED", "CANCELLED"]
     },
     "securityDecision": { "type": "string", "enum": ["PENDING", "PASS", "FAIL", "INCOMPLETE"] },
+    "decisionReason": {
+      "description": "Why the security decision was reached; null while PENDING.",
+      "enum": [
+        null,
+        "POLICY_EVALUATED",
+        "POLICY_EVALUATION_UNAVAILABLE",
+        "SCANNER_EXECUTION_INCOMPLETE",
+        "EXECUTION_DEADLINE_EXCEEDED",
+        "EXECUTION_FAILED",
+        "CANCELLED_BY_USER"
+      ]
+    },
     "requestedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
     "startedAt": { "$ref": "common.schema.json#/$defs/nullableTimestamp" },
+    "deadlineAt": {
+      "description": "Hard execution deadline, set when the first job is claimed.",
+      "$ref": "common.schema.json#/$defs/nullableTimestamp"
+    },
     "completedAt": { "$ref": "common.schema.json#/$defs/nullableTimestamp" },
     "jobs": { "type": "array", "items": { "$ref": "scan-job.schema.json" } }
   },
   "allOf": [
     {
-      "if": { "properties": { "executionStatus": { "enum": ["QUEUED", "RUNNING"] } } },
-      "then": { "properties": { "securityDecision": { "const": "PENDING" }, "completedAt": { "type": "null" } } }
+      "if": { "properties": { "executionStatus": { "enum": ["QUEUED", "RUNNING", "EVALUATING"] } } },
+      "then": {
+        "properties": {
+          "securityDecision": { "const": "PENDING" },
+          "decisionReason": { "type": "null" },
+          "completedAt": { "type": "null" }
+        }
+      }
     },
     {
       "if": { "properties": { "executionStatus": { "enum": ["FAILED", "CANCELLED"] } } },
@@ -46,6 +70,10 @@
     {
       "if": { "properties": { "executionStatus": { "const": "COMPLETED" } } },
       "then": { "properties": { "securityDecision": { "enum": ["PASS", "FAIL", "INCOMPLETE"] } } }
+    },
+    {
+      "if": { "properties": { "securityDecision": { "enum": ["PASS", "FAIL"] } } },
+      "then": { "properties": { "decisionReason": { "const": "POLICY_EVALUATED" } } }
     }
   ]
 }

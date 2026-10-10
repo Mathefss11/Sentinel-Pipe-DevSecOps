@@ -1,8 +1,9 @@
 package dev.sentinelpipe.api.scanjob;
 
 /**
- * Scanners on the SentinelPipe roadmap. These are identifiers only; no scanner is
- * integrated or executed by this version.
+ * Scanners on the SentinelPipe roadmap. The real scanners are identifiers only; none is
+ * integrated or executed by this version. {@link #FIXTURE} is a harmless execution
+ * fixture used to exercise the execution lifecycle and isolation.
  */
 public enum ScannerType {
 
@@ -22,6 +23,13 @@ public enum ScannerType {
 	SYFT,
 
 	/** Dynamic application security testing. */
-	ZAP
+	ZAP,
+
+	/**
+	 * Harmless execution fixture: runs no scanner and inspects no repository content. It
+	 * validates leases, heartbeats, cancellation and (later) sandbox limits. Plannable only
+	 * when {@code sentinel.execution.fixture-enabled=true}, which production profiles refuse.
+	 */
+	FIXTURE
 
 }

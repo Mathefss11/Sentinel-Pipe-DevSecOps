@@ -5,7 +5,9 @@ spring:
     name: sentinel-api
   datasource:
     url: jdbc:postgresql://${SENTINEL_DB_HOST:localhost}:${SENTINEL_DB_PORT:5432}/${SENTINEL_DB_NAME:sentinelpipe}
-    username: ${SENTINEL_DB_USERNAME:sentinel}
+    # Least-privileged runtime login (member of sentinel_api: DML only, no DDL), created by
+    # infrastructure/docker/postgres/provision-roles.sh. Never the schema owner or a superuser.
+    username: ${SENTINEL_DB_USERNAME:sentinel_api_app}
     password: ${SENTINEL_DB_PASSWORD}
   jpa:
     open-in-view: false
@@ -19,6 +21,13 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+    # Dedicated migration login, separate from the runtime login above. It owns nothing and
+    # inherits nothing: every Flyway connection switches to the non-superuser owner role,
+    # so all objects belong to sentinel_owner (V006 refuses to run otherwise). Deployments
+    # that run migrations as a separate step set SPRING_FLYWAY_ENABLED=false for the API.
+    user: ${SENTINEL_DB_MIGRATION_USERNAME:sentinel_migrator_app}
+    password: ${SENTINEL_DB_MIGRATION_PASSWORD}
+    init-sqls: SET ROLE sentinel_owner
   rabbitmq:
     host: ${SENTINEL_RABBITMQ_HOST:localhost}
     port: ${SENTINEL_RABBITMQ_PORT:5672}
@@ -97,6 +106,22 @@ sentinel:
     cleanup-interval: 10m
     cleanup-batch-size: 500
     cleanup-max-batches: 20
+  # Scan execution lifecycle (M3 Phase 1, ADR-0007). Leases, deadlines and decisions are
+  # enforced by PostgreSQL functions; these values are copied onto every new scan.
+  execution:
+    # Harmless FIXTURE scanner for development, CI and tests. Refused under prod profiles.
+    fixture-enabled: false
+    # Jobs planned automatically for each new scan. No real scanner is executable yet.
+    planned-scanners: []
+    lease-duration: 60s
+    execution-timeout: 15m
+    # Evidence content is kept this long after upload (whole days); digests and results remain.
+    evidence-retention: 90d
+    supervisor:
+      # Reclaims expired leases, enforces deadlines and records decisions (safe on many instances).
+      enabled: true
+      interval: 5s
+      batch-size: 100
   security:
     jwt:
       jws-algorithms: RS256

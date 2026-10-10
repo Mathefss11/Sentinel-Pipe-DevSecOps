@@ -15,6 +15,8 @@ public enum OrganizationPermission {
 
 	REQUEST_SCAN(OrganizationRole.MEMBER),
 
+	CANCEL_SCAN(OrganizationRole.MEMBER),
+
 	REGISTER_PROJECT(OrganizationRole.ADMIN),
 
 	VIEW_MEMBERS(OrganizationRole.ADMIN),

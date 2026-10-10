@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sentinelpipe.dev/schemas/v1/scan-job.schema.json",
   "title": "ScanJob",
-  "description": "One scanner execution within a scan. COMPLETED means the scanner produced its output; it says nothing about findings.",
+  "description": "One scanner execution within a scan. COMPLETED means the scanner produced its output; it says nothing about findings. failureReason explains a FAILED job, or the last failed attempt of a requeued one.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -11,6 +11,7 @@
     "scannerType",
     "executionStatus",
     "attemptCount",
+    "failureReason",
     "createdAt",
     "startedAt",
     "completedAt"
@@ -20,13 +21,26 @@
     "scanId": { "$ref": "common.schema.json#/$defs/uuid" },
     "scannerType": {
       "type": "string",
-      "enum": ["SEMGREP", "GITLEAKS", "TRIVY", "CHECKOV", "SYFT", "ZAP"]
+      "enum": ["SEMGREP", "GITLEAKS", "TRIVY", "CHECKOV", "SYFT", "ZAP", "FIXTURE"]
     },
     "executionStatus": {
       "type": "string",
       "enum": ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"]
     },
     "attemptCount": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "failureReason": {
+      "enum": [
+        null,
+        "LEASE_EXPIRED",
+        "SCANNER_ERROR",
+        "SANDBOX_ERROR",
+        "WORKER_SHUTDOWN",
+        "EXECUTION_TIMEOUT",
+        "RESOURCE_LIMIT_EXCEEDED",
+        "UNSUPPORTED_SCANNER",
+        "EXECUTION_DEADLINE_EXCEEDED"
+      ]
+    },
     "createdAt": { "$ref": "common.schema.json#/$defs/timestamp" },
     "startedAt": { "$ref": "common.schema.json#/$defs/nullableTimestamp" },
     "completedAt": { "$ref": "common.schema.json#/$defs/nullableTimestamp" }
