@@ -10,12 +10,15 @@ its outcome is durable:
 * ``RETRY`` (transient failure): the message is published to the retry exchange with an
   incremented ``x-sentinel-retry-count`` header, then acknowledged. The retry queue holds
   it for its TTL and dead-letters it back to the work queue. After ``max_retries`` the
-  handler dead-letters it permanently. Retries never block the consumer thread.
+  handler dead-letters it permanently. The redelivery delay is the retry queue's TTL.
 
 If a republication (dead-letter or retry) is not confirmed, the original is requeued
-after a bounded pause instead of being dropped. If the worker crashes before
-acknowledging, RabbitMQ redelivers the message (counted against the queue's delivery
-limit); the receipt store makes the redelivery a no-op duplicate.
+after a bounded pause instead of being dropped. While the receipt store is unavailable
+the consumer backs off (exponentially, capped below the heartbeat interval) between
+messages, so a database outage does not drain the work queue into the retry and
+dead-letter queues at full speed. If the worker crashes before acknowledging, RabbitMQ
+redelivers the message (counted against the queue's delivery limit); the receipt store
+makes the redelivery a no-op duplicate.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from sentinel_worker.messaging.handler import (
     MessageProperties,
 )
 from sentinel_worker.messaging.settings import ConsumerSettings
+from sentinel_worker.metrics import WorkerMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +88,9 @@ DEAD_LETTER_HEADER = TOPOLOGY.dead_letter_header
 RETRY_COUNT_HEADER = TOPOLOGY.retry_count_header
 
 REPUBLISH_FAILURE_PAUSE_SECONDS = 5.0
+STORE_OUTAGE_BACKOFF_INITIAL_SECONDS = 1.0
+# Below the 30 s AMQP heartbeat interval, so the broker never drops the connection.
+STORE_OUTAGE_BACKOFF_MAX_SECONDS = 10.0
 
 
 def new_worker_id() -> str:
@@ -121,11 +128,14 @@ class ScanRequestConsumer:
         handler: MessageHandler,
         worker_id: str,
         sleep: Callable[[float], None] = time.sleep,
+        metrics: WorkerMetrics | None = None,
     ) -> None:
         self._settings = settings
         self._handler = handler
         self._worker_id = worker_id
         self._sleep = sleep
+        self._metrics = metrics
+        self._outage_backoff = 0.0
         self.stats = ConsumerStats()
 
     def connection_parameters(self) -> pika.ConnectionParameters:
@@ -216,6 +226,12 @@ class ScanRequestConsumer:
                 "retry_scheduled",
             )
         self.stats.outcomes[outcome] += 1
+        if self._metrics is not None:
+            self._metrics.observe(
+                outcome,
+                result.failure_code.value if result.failure_code else None,
+                result.store_error,
+            )
         _log(
             "message.processed",
             level=logging.WARNING if outcome not in ("accepted", "duplicate") else logging.INFO,
@@ -226,7 +242,22 @@ class ScanRequestConsumer:
             retry_count=retries,
             redelivered=bool(method.redelivered),
         )
+        self._pace(result.store_error)
         return result
+
+    def _pace(self, store_error: bool) -> None:
+        """Exponential, capped pause after receipt-store failures; reset on success."""
+        if not store_error:
+            self._outage_backoff = 0.0
+            return
+        self._outage_backoff = min(
+            STORE_OUTAGE_BACKOFF_MAX_SECONDS,
+            max(STORE_OUTAGE_BACKOFF_INITIAL_SECONDS, self._outage_backoff * 2),
+        )
+        _log(
+            "receipt_store.unavailable", level=logging.WARNING, backoff_seconds=self._outage_backoff
+        )
+        self._sleep(self._outage_backoff)
 
     def _republish_then_ack(
         self,

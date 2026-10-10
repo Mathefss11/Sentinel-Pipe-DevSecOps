@@ -44,7 +44,15 @@ import org.springframework.transaction.support.TransactionTemplate;
  * new transaction.</li>
  * </ul>
  * Correctness relies on the database constraint, not on in-memory locks, so it holds
- * across application instances. Keys do not expire yet.
+ * across application instances.
+ * <p>
+ * <b>Expiry.</b> A key is honored for {@code sentinel.idempotency.retention} (default
+ * 24h) after its scan was requested ({@link IdempotencyProperties}). An expired key is
+ * never replayed, even if the periodic cleanup has not released it yet: a request reusing
+ * it first releases the key from the old scan (row-locked {@code UPDATE}) and then
+ * creates a new scan, in one transaction. Concurrent reuses of the same expired key
+ * serialize on that row lock and the unique constraint, so exactly one new scan is
+ * created and the others replay it.
  */
 @Service
 public class ScanService {
@@ -75,10 +83,14 @@ public class ScanService {
 
 	private final TransactionTemplate readTransaction;
 
+	private final IdempotencyProperties idempotency;
+
 	private final Clock clock;
 
 	ScanService(ScanRepository scans, ScanJobRepository scanJobs, ProjectService projectService,
-			ScanRequestedEvents scanRequestedEvents, PlatformTransactionManager transactionManager, Clock clock) {
+			ScanRequestedEvents scanRequestedEvents, PlatformTransactionManager transactionManager,
+			IdempotencyProperties idempotency, Clock clock) {
+		idempotency.validate();
 		this.scans = scans;
 		this.scanJobs = scanJobs;
 		this.projectService = projectService;
@@ -86,6 +98,7 @@ public class ScanService {
 		this.writeTransaction = new TransactionTemplate(transactionManager);
 		this.readTransaction = new TransactionTemplate(transactionManager);
 		this.readTransaction.setReadOnly(true);
+		this.idempotency = idempotency;
 		this.clock = clock;
 	}
 
@@ -121,6 +134,9 @@ public class ScanService {
 		try {
 			return this.writeTransaction.execute((status) -> {
 				Project project = this.projectService.requireAcceptingScans(projectId);
+				if (idempotencyKey != null) {
+					releaseIfExpired(projectId, idempotencyKey);
+				}
 				Scan scan = Scan.request(projectId, normalizedSha, validatedBranch, triggerType, idempotencyKey,
 						requestFingerprint, Timestamps.now(this.clock));
 				this.scans.saveAndFlush(scan);
@@ -164,6 +180,7 @@ public class ScanService {
 	private Optional<ScanRequestOutcome> findReplay(UUID projectId, String idempotencyKey, String fingerprint) {
 		return this.readTransaction.execute((status) -> this.scans
 			.findByProjectIdAndIdempotencyKey(projectId, idempotencyKey)
+			.filter((existing) -> !this.idempotency.isExpired(existing.getRequestedAt(), this.clock.instant()))
 			.map((existing) -> {
 				if (!existing.matchesFingerprint(fingerprint)) {
 					throw new IdempotencyKeyReuseException();
@@ -172,6 +189,19 @@ public class ScanService {
 						new ScanDetails(existing, this.scanJobs.findByScanIdOrderByScannerTypeAsc(existing.getId())),
 						true);
 			}));
+	}
+
+	/**
+	 * Releases {@code idempotencyKey} from its scan if the key has expired, so the insert
+	 * that follows can reuse it. Runs in the creating transaction; the row lock it takes
+	 * serializes concurrent reuses of the same key.
+	 */
+	private void releaseIfExpired(UUID projectId, String idempotencyKey) {
+		int released = this.scans.releaseExpiredIdempotencyKey(projectId, idempotencyKey,
+				this.idempotency.cutoff(this.clock.instant()));
+		if (released > 0) {
+			log.info("idempotency.key_expired_reused project_id={}", projectId);
+		}
 	}
 
 	private static void requireValidIdempotencyKey(String idempotencyKey) {

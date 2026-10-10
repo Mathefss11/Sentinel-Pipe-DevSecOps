@@ -131,6 +131,7 @@ public class OutboxPublisher {
 				}
 				continue;
 			}
+			this.metrics.publishFailed(failure.get());
 			boolean finalAttempt = event.attempts() >= this.settings.getMaxAttempts();
 			Duration delay = retryDelay(event.attempts());
 			if (!this.store.markAttemptFailed(event.eventId(), this.instanceId, failure.get(), delay,

@@ -105,8 +105,8 @@ jobs:
       - name: Check formatting
         run: ruff format --check .
 
-      # The integration tests start a real RabbitMQ broker through Testcontainers. See the
-      # api job for why images are pulled up front with optional read-only credentials.
+      # The integration tests start real RabbitMQ and PostgreSQL through Testcontainers. See
+      # the api job for why images are pulled up front with optional read-only credentials.
       - name: Check for Docker Hub credentials
         id: dockerhub
         env:
@@ -127,11 +127,12 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Must match RABBITMQ_IMAGE in tests/integration/test_rabbitmq_consumer.py.
+      # Must match RABBITMQ_IMAGE and POSTGRES_IMAGE in tests/integration/infrastructure.py.
       - name: Pre-pull Testcontainers images
         run: >-
           sh "$GITHUB_WORKSPACE/scripts/ci/pull-images.sh"
           rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
+          postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
 
       - name: Log out of Docker Hub
         if: always()
@@ -202,7 +203,9 @@ jobs:
         run: docker logout
 
       # Java scan creation, outbox publication with confirms, RabbitMQ delivery, and the real
-      # Python worker process persisting its receipt (ScanDeliveryE2ETests).
+      # Python worker process recording its receipt in PostgreSQL, verified against the
+      # outbox (ScanDeliveryE2ETests); forged messages and an audited operator DLQ replay.
+      # The e2e profile sets failIfNoTests, so this step fails if no E2E test runs.
       - name: Run end-to-end tests
         working-directory: services/sentinel-api
         run: sh ./mvnw --batch-mode --no-transfer-progress verify -Pe2e "-Dsentinel.e2e.python=$(command -v python)"
@@ -260,6 +263,14 @@ jobs:
       # stack is ephemeral, bound to loopback, and destroyed at the end of the job.
       - name: Start local stack and wait for health checks
         run: docker compose --env-file .env.example up --pull never --detach --wait --wait-timeout 180
+
+      # The runtime identities are least-privileged; provisioning is a separate, administrative
+      # step (topology import, users, permissions, database login roles).
+      - name: Provision least-privileged identities
+        run: sh scripts/dev/provision.sh .env.example
+
+      - name: Verify broker permissions
+        run: sh scripts/ci/verify-broker-permissions.sh .env.example
 
       - name: Show service status
         if: always()

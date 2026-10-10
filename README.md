@@ -7,11 +7,13 @@ against versioned security policies, and publish actionable remediation reports 
 It is also a cybersecurity engineering portfolio project. The emphasis is on secure design,
 verifiable behavior, and honest reporting of coverage and limitations.
 
-> **Status: Milestone 2, Phase 2B (Transactional outbox & reliable messaging).** The
-> control plane registers organizations and GitHub-hosted projects, accepts authenticated
-> and authorized scan requests for specific commits, and delivers them reliably to the
-> Python worker through a transactional outbox and RabbitMQ. The worker validates each
-> request and records a durable receipt. **No scanner is executed yet**, and policy
+> **Status: Milestone 2, Phase 2C (Distributed reliability, hardening & observability).**
+> The control plane registers organizations and GitHub-hosted projects, accepts
+> authenticated and authorized scan requests for specific commits, and delivers them
+> reliably to any number of Python workers through a transactional outbox and RabbitMQ.
+> Workers share one PostgreSQL receipt store that accepts a message only if it matches
+> the committed outbox event and its tenant relationships. All runtime identities are
+> least-privileged. **No scanner is executed yet**, and policy
 > evaluation and GitHub integration are not implemented. The domain API is still
 > restricted to loopback, development-stage use (see
 > [Security limitations](#current-security-limitations)).
@@ -188,6 +190,16 @@ Invoke-RestMethod http://127.0.0.1:8080/actuator/health
 The application deliberately refuses to start if `SENTINEL_DB_PASSWORD` or
 `SENTINEL_RABBITMQ_PASSWORD` is missing.
 
+The API publishes with the least-privileged `sentinel-publisher` broker user and does not
+declare the broker topology. Provision the topology and all runtime identities once,
+right after the stack is up and **before** starting the API or a worker (otherwise the
+API's publishes fail until the topology exists). The scripts work before or after the
+Flyway migrations:
+
+```powershell
+.\scripts\dev\provision.ps1        # see docs/runbooks/messaging.md, section 2
+```
+
 With the default configuration, only the health endpoints are reachable; every other
 request is denied. To use the domain API locally, configure an identity provider (below)
 and start the application with the `local` profile. It binds the server to `127.0.0.1`
@@ -325,7 +337,16 @@ The full contract is in [`packages/contracts`](packages/contracts/README.md).
 **Idempotency.** Keys are scoped per project and enforced by the database unique
 constraint `uq_scans_project_idempotency_key`, together with a SHA-256 fingerprint of the
 normalized request. Concurrent retries create at most one scan. In-memory locks are not
-relied on. Keys do not expire yet.
+relied on.
+
+Keys are retained for `sentinel.idempotency.retention`, 24 h by default, counted from
+when the scan was requested. A key is **expired** once `requested_at <= now - retention`:
+
+- An expired key never replays. Reusing it creates a new scan, even with a different
+  payload, and the response carries `Idempotent-Replayed: false`.
+- Concurrent reuses of an expired key still create exactly one new scan.
+- A periodic cleanup releases expired keys in bounded batches. It only clears the key
+  columns: scans, outbox events and receipts are never deleted.
 
 ### 6. Set up the worker
 
@@ -340,8 +361,8 @@ py -m venv .venv
 validates the Python runtime and the worker configuration (`SENTINEL_WORKER_*` variables).
 It does not connect to external services.
 
-To consume scan requests, create the worker's own least-privileged broker user first
-([runbook §2](docs/runbooks/messaging.md#2-provisioning-least-privilege-broker-users-local)),
+To consume scan requests, provision the worker's own broker user and database role first
+([runbook §2](docs/runbooks/messaging.md#2-provisioning-least-privilege-identities)),
 load `.env` into the session (as for the API), then:
 
 ```powershell
@@ -352,14 +373,24 @@ load `.env` into the session (as for the API), then:
 |---|---|
 | `SENTINEL_WORKER_RABBITMQ_HOST` / `_PORT` / `_VHOST` | Broker address (defaults `localhost`, `5672`, `/`) |
 | `SENTINEL_WORKER_RABBITMQ_USERNAME` / `_PASSWORD` | The worker's own broker user (required; never logged) |
-| `SENTINEL_WORKER_RECEIPT_DB` | Durable receipt store (default `.sentinel-worker/receipts.sqlite3`) |
+| `SENTINEL_WORKER_RECEIPT_BACKEND` | `postgres` (default, shared and verified) or `sqlite` (development only) |
+| `SENTINEL_WORKER_DB_HOST` / `_PORT` / `_NAME` | Receipt database (defaults `localhost`, `5432`, `sentinelpipe`) |
+| `SENTINEL_WORKER_DB_USERNAME` / `_PASSWORD` | The worker's own database login role (required; never logged) |
+| `SENTINEL_WORKER_DB_SSLMODE` | libpq `sslmode`; `production` requires `verify-ca` or `verify-full` |
+| `SENTINEL_WORKER_METRICS_PORT` / `_ADDRESS` | Optional Prometheus exposition, loopback only (off by default) |
 | `SENTINEL_WORKER_PREFETCH` | Unacknowledged messages in flight, 1–50 (default 1) |
+
+Operator recovery commands (`outbox-summary`, `outbox-list-failed`,
+`outbox-requeue-failed`, `dlq-depth`, `dlq-replay`) use separate `SENTINEL_OPERATOR_*`
+credentials. Every requeue and replay is bounded and audited
+([runbook §5–6](docs/runbooks/messaging.md#5-recovering-failed-outbox-events)).
 
 ## Asynchronous scan delivery
 
 ```text
 POST /scans ─► [ scans + outbox_events ] one transaction ─► OutboxPublisher (confirms)
-  ─► RabbitMQ sentinel.scan-requests ─► sentinel-worker: validate ─► commit receipt ─► ack
+  ─► RabbitMQ sentinel.scan-requests ─► sentinel-worker × N: validate
+  ─► worker.record_receipt (PostgreSQL: verify against outbox + scan, unique event_id) ─► ack
 ```
 
 - **Transactional outbox.** A scan and its `scan.requested` v1 event are committed
@@ -371,12 +402,17 @@ POST /scans ─► [ scans + outbox_events ] one transaction ─► OutboxPublis
   publisher confirm. Failures retry with exponential backoff (2 s doubling to 5 min, 8
   attempts) and then become `FAILED`, which is recoverable by an operator.
 - **Worker.** Validates size, encoding, strict JSON, the shared schema and AMQP
-  properties. It commits a durable receipt keyed by `event_id` **before** acknowledging.
-  Duplicates are acknowledged without effect; a reused `event_id` with different content
-  (for example another tenant) is dead-lettered as possible tampering. Invalid messages go
-  to the dead-letter queue with metadata and their original body; transient failures retry
-  through a delayed retry queue (max 5); crash loops are bounded by the quorum queue's
-  delivery limit.
+  properties, then calls `worker.record_receipt` in PostgreSQL **before** acknowledging.
+  The database accepts the message only if it is byte-identical to the committed outbox
+  payload and its scan, project, organization and commit match the authoritative rows.
+  Acceptance is unique per `event_id` across all workers. Duplicates are acknowledged
+  without effect. Forged, altered or cross-tenant messages are dead-lettered and recorded
+  for forensics. The worker's database role can execute only that function. Transient
+  failures (for example a database outage) retry through a delayed retry queue (max 5);
+  crash loops are bounded by the quorum queue's delivery limit.
+- **Least privilege.** The API publishes as `sentinel-publisher` (write only), and the
+  worker and operator have their own users. No runtime identity can change the broker
+  topology, which is provisioned separately.
 - **Guarantees.** At-least-once delivery, idempotent processing by `event_id`, **no
   exactly-once delivery and no ordering guarantee**. Exactly-once would require a
   distributed transaction spanning PostgreSQL, RabbitMQ and the worker, which RabbitMQ does
@@ -385,8 +421,10 @@ POST /scans ─► [ scans + outbox_events ] one transaction ─► OutboxPublis
   harmless duplicate instead.
 
 Details: [ADR-0004](docs/adr/0004-transactional-outbox-and-at-least-once-messaging.md),
+[ADR-0005](docs/adr/0005-shared-receipts-tenant-verification-and-least-privilege.md),
 [architecture](docs/architecture/asynchronous-messaging.md),
-[runbook](docs/runbooks/messaging.md), contracts in
+[messaging runbook](docs/runbooks/messaging.md),
+[observability runbook](docs/runbooks/observability.md) (metrics, alerts), contracts in
 [`packages/contracts/messages`](packages/contracts/messages/v1) and
 [`packages/contracts/messaging/topology.v1.json`](packages/contracts/messaging/topology.v1.json).
 
@@ -398,7 +436,7 @@ Details: [ADR-0004](docs/adr/0004-transactional-outbox-and-at-least-once-messagi
 | Worker lint | `.\.venv\Scripts\ruff.exe check .` | — |
 | Worker formatting | `.\.venv\Scripts\ruff.exe format --check .` | — |
 | Worker unit tests | `.\.venv\Scripts\python.exe -m pytest -m "not integration"` | — |
-| Worker tests incl. RabbitMQ integration | `.\.venv\Scripts\python.exe -m pytest` | Docker (Testcontainers) |
+| Worker tests incl. RabbitMQ and PostgreSQL integration | `.\.venv\Scripts\python.exe -m pytest` | Docker (Testcontainers) |
 | End to end: API → outbox → RabbitMQ → real worker | `.\mvnw.cmd verify -Pe2e "-Dsentinel.e2e.python=..\sentinel-worker\.venv\Scripts\python.exe"` (`services/sentinel-api`) | Docker, worker installed |
 | Compose configuration | `docker compose --env-file .env.example config --quiet` (repository root) | Docker |
 | OPA authorization policy | `docker run --rm -v "${PWD}\infrastructure\docker\opa:/policies:ro" openpolicyagent/opa:1.21.1 test /policies -v` | Docker |
@@ -449,12 +487,17 @@ four jobs (the worker job runs once per Python version):
 
 - **sentinel-api:** `mvnw clean verify` on JDK 21, including the Testcontainers integration tests.
 - **sentinel-worker:** Ruff lint, Ruff format check and Pytest on Python 3.12 and 3.14,
-  including RabbitMQ integration tests via Testcontainers (pinned image, pre-pulled).
+  including RabbitMQ and PostgreSQL integration tests via Testcontainers (pinned images,
+  pre-pulled; schema from the real Flyway migrations, identities from the real
+  provisioning scripts).
 - **End-to-end:** an authenticated scan request travels through the outbox, publisher
-  confirms and RabbitMQ to the real Python worker, which persists its receipt; the test also
-  covers a publisher crash after the broker confirm (`-Pe2e`).
-- **Infrastructure:** validates `compose.yaml`, checks and tests the OPA authorization policy,
-  starts the stack and waits for all health checks, then tears it down.
+  confirms and RabbitMQ to the real Python worker, which records its receipt in
+  PostgreSQL. The suite also covers a publisher crash after the broker confirm, a
+  forged message, and an audited dead-letter replay through the operator CLI (`-Pe2e`;
+  the profile fails if no E2E test runs).
+- **Infrastructure:** validates `compose.yaml`, checks and tests the OPA authorization
+  policy, starts the stack and waits for all health checks, provisions the runtime
+  identities and verifies the exact broker permissions, then tears it down.
 
 The workflow uses a read-only `GITHUB_TOKEN` (`contents: read`). It does not persist checkout
 credentials and has no deployment or publishing steps. Third-party actions are pinned to full
@@ -517,8 +560,23 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 - [x] Python consumer: strict validation, durable receipts before ack, duplicate and
   tampering detection, least-privileged broker user
 - [x] Outbox metrics, structured logs, ADR-0004, architecture notes and runbook
-- [ ] Shared receipt store for multiple worker instances (next phase)
-- [ ] Restricted broker user for the API; metrics endpoint exposure (later phases)
+- [x] Shared receipt store for multiple worker instances (Phase 2C)
+- [x] Restricted broker user for the API; metrics endpoint exposure (Phase 2C)
+
+## Milestone 2, Phase 2C checklist
+
+- [x] Flyway `V005__worker_receipts_and_operations.sql`: shared receipts, rejections,
+  audited recovery functions, group roles; historical migrations unchanged
+- [x] Database-verified acceptance: digest of the committed outbox payload and
+  authoritative tenant relationships; worker role limited to one function
+- [x] Least-privileged RabbitMQ publisher, worker and operator users; topology provisioned
+  from `definitions.json`; dead-letter queue protected against the default delivery limit
+- [x] Idempotency-key retention, expiry semantics and bounded cleanup
+- [x] Low-cardinality metrics (API and worker), loopback-only Prometheus exposure, outbox
+  health contributor, alert guidance
+- [x] Audited, bounded operator CLI for outbox requeue and dead-letter replay
+- [x] Concurrency, fault-injection, permission and end-to-end tests against real
+  PostgreSQL and RabbitMQ; ADR-0005 and runbooks
 
 ## Architecture decisions
 
@@ -526,6 +584,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 - [ADR-0002: Domain API disabled until authentication exists](docs/adr/0002-domain-api-exposure-before-authentication.md)
 - [ADR-0003: External OIDC identity and membership-based tenant authorization](docs/adr/0003-identity-and-tenant-authorization.md)
 - [ADR-0004: Transactional outbox and at-least-once messaging](docs/adr/0004-transactional-outbox-and-at-least-once-messaging.md)
+- [ADR-0005: Shared worker receipts, database-verified messages and least-privilege runtime identities](docs/adr/0005-shared-receipts-tenant-verification-and-least-privilege.md)
 
 ## Current security limitations
 
@@ -537,14 +596,17 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   stay valid until they expire; there is no token revocation or introspection.
 - A single trusted token issuer is supported. Machine identities (GitHub App, Actions
   OIDC) arrive in M5.
-- Queue messages are not signed. Their integrity relies on broker access control. The
-  worker uses its own least-privileged broker user; the API still uses the Compose
-  administrative user.
-- The worker's receipt store is local to one host, so deduplication across several worker
-  instances is not yet guaranteed.
+- Queue messages are not signed. Workers accept only messages identical to the
+  committed outbox event, so broker access alone cannot inject an accepted request, but a
+  party that can write both the database and the broker could.
+- Delivery is at-least-once, never exactly-once. Acceptance is exactly once per
+  `event_id` across all workers.
+- RabbitMQ lets an identity that may read a queue also purge it (worker: work queue;
+  operator: dead-letter queue). The outbox remains the system of record.
+- The API connects to PostgreSQL as the schema owner; separate runtime and migration
+  roles are future work.
 - `triggerType` and `branch` are supplied by the caller and not yet verified against
-  GitHub events or Actions OIDC claims.
-- Idempotency keys do not expire, and there is no rate limiting.
+  GitHub events or Actions OIDC claims. There is no rate limiting.
 - No scanner runs, so no real security decision is produced yet. `PASS`/`FAIL` can only
   be set by internal code paths, which are exercised by tests.
 
@@ -553,7 +615,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 | Milestone | Scope |
 |---|---|
 | M1 — Foundation | Complete |
-| **M2 — Domain & Contracts** | Phases 1, 2A and 2B complete (see checklists); remaining: idempotency-key expiry, shared receipt store |
+| **M2 — Domain & Contracts** | Phases 1, 2A, 2B and 2C complete (see checklists) |
 | M3 — Scanners | Discovery, Semgrep/Gitleaks/Trivy adapters, normalized findings, correlation |
 | M4 — Security Gate & Remediation | OPA policies, coverage, exceptions, decisions, remediation reports |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |

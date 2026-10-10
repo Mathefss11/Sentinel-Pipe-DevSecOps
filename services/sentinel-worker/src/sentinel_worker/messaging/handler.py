@@ -8,6 +8,10 @@ Pure decision logic (no broker I/O) so every path is unit-testable:
 * a duplicate delivery of the same message is acknowledged without new effects;
 * the same ``event_id`` with a different message (replay with altered tenant or
   commit, i.e. tampering) is dead-lettered and the original receipt is kept;
+* a message that does not match the authoritative outbox event, scan and project in
+  the control-plane database (unknown event, different content, or different
+  scan/project/organization/commit) is dead-lettered; the PostgreSQL receipt store
+  performs this check, so tenant identifiers in the payload are never trusted;
 * a receipt-store failure is transient: the message is retried through the delayed
   retry queue, and dead-lettered once ``max_retries`` retries are exhausted.
 
@@ -32,9 +36,9 @@ from sentinel_worker import __version__
 from sentinel_worker.messaging import contracts
 from sentinel_worker.messaging.receipts import (
     Receipt,
+    ReceiptStore,
     ReceiptStoreError,
     RecordOutcome,
-    SqliteReceiptStore,
 )
 
 MAX_MESSAGE_BYTES = 64 * 1024
@@ -58,6 +62,9 @@ class FailureCode(StrEnum):
     SCHEMA_VIOLATION = "SCHEMA_VIOLATION"
     PROPERTIES_MISMATCH = "PROPERTIES_MISMATCH"
     EVENT_ID_CONFLICT = "EVENT_ID_CONFLICT"
+    UNKNOWN_EVENT = "UNKNOWN_EVENT"
+    DIGEST_MISMATCH = "DIGEST_MISMATCH"
+    RELATIONSHIP_MISMATCH = "RELATIONSHIP_MISMATCH"
     TRANSIENT_RETRIES_EXHAUSTED = "TRANSIENT_RETRIES_EXHAUSTED"
 
 
@@ -72,12 +79,28 @@ _DETAILS = {
     FailureCode.EVENT_ID_CONFLICT: (
         "A different message with the same event_id was already processed; possible tampering."
     ),
+    FailureCode.UNKNOWN_EVENT: (
+        "No matching scan.requested event exists in the control plane; possible forgery."
+    ),
+    FailureCode.DIGEST_MISMATCH: (
+        "The message differs from the event committed by the control plane; possible tampering."
+    ),
+    FailureCode.RELATIONSHIP_MISMATCH: (
+        "Scan, project, organization or commit do not match the control plane; possible tampering."
+    ),
     FailureCode.TRANSIENT_RETRIES_EXHAUSTED: (
         "The receipt store stayed unavailable for every retry; the message was not processed."
     ),
 }
 
 DEFAULT_MAX_RETRIES = int(contracts.topology()["retry"]["max_retries"])
+
+_REJECTIONS = {
+    RecordOutcome.CONFLICT: FailureCode.EVENT_ID_CONFLICT,
+    RecordOutcome.REJECTED_UNKNOWN_EVENT: FailureCode.UNKNOWN_EVENT,
+    RecordOutcome.REJECTED_DIGEST_MISMATCH: FailureCode.DIGEST_MISMATCH,
+    RecordOutcome.REJECTED_RELATIONSHIP_MISMATCH: FailureCode.RELATIONSHIP_MISMATCH,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +122,8 @@ class HandlingResult:
     duplicate: bool = False
     failure_code: FailureCode | None = None
     dead_letter_metadata: dict[str, Any] | None = None
+    store_error: bool = False
+    """The receipt store failed (transient); the message was not accepted."""
 
 
 class _DuplicateKeyError(ValueError):
@@ -129,7 +154,7 @@ def _iso(moment: datetime) -> str:
 class MessageHandler:
     def __init__(
         self,
-        store: SqliteReceiptStore,
+        store: ReceiptStore,
         worker_id: str,
         clock: Callable[[], datetime] = _utc_now,
         worker_version: str = __version__,
@@ -192,15 +217,17 @@ class MessageHandler:
         except ReceiptStoreError:
             if properties.retry_count >= self._max_retries:
                 return self._dead_letter(
-                    FailureCode.TRANSIENT_RETRIES_EXHAUSTED, body, digest, message
+                    FailureCode.TRANSIENT_RETRIES_EXHAUSTED, body, digest, message, store_error=True
                 )
             return HandlingResult(
                 Disposition.RETRY,
                 event_id=message["event_id"],
                 correlation_id=message["correlation_id"],
+                store_error=True,
             )
-        if outcome is RecordOutcome.CONFLICT:
-            return self._dead_letter(FailureCode.EVENT_ID_CONFLICT, body, digest, message)
+        rejection = _REJECTIONS.get(outcome)
+        if rejection is not None:
+            return self._dead_letter(rejection, body, digest, message)
         return HandlingResult(
             Disposition.ACK,
             event_id=message["event_id"],
@@ -214,6 +241,7 @@ class MessageHandler:
         body: bytes,
         digest: str,
         message: Mapping[str, Any] | None,
+        store_error: bool = False,
     ) -> HandlingResult:
         def identifier(field: str, pattern: re.Pattern[str]) -> str | None:
             # Only well-formed identifiers are copied; malformed values are not echoed.
@@ -246,4 +274,5 @@ class MessageHandler:
             correlation_id=metadata["correlation_id"],
             failure_code=code,
             dead_letter_metadata=metadata,
+            store_error=store_error,
         )

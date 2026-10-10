@@ -38,7 +38,9 @@ import tools.jackson.databind.json.JsonMapper;
 		"sentinel.security.jwt.issuer=" + TestJwts.ISSUER, "sentinel.security.jwt.audience=" + TestJwts.AUDIENCE,
 		"sentinel.security.platform-admin-subjects=" + TestJwts.PLATFORM_ADMIN,
 		// Outbox publication is driven explicitly by tests for deterministic results.
-		"sentinel.messaging.outbox.publisher-enabled=false" })
+		"sentinel.messaging.outbox.publisher-enabled=false",
+		// Administrative test broker user; deployments provision topology out of band.
+		"sentinel.messaging.declare-topology=true" })
 @Import(TestcontainersConfiguration.class)
 public abstract class AbstractDomainApiIntegrationTest {
 

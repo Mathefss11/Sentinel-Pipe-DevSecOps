@@ -28,7 +28,8 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 
 		assertThat(history).extracting((row) -> row.get("script"))
 			.containsExactly("V001__initial_schema.sql", "V002__core_domain.sql",
-					"V003__identity_and_memberships.sql", "V004__transactional_outbox.sql");
+					"V003__identity_and_memberships.sql", "V004__transactional_outbox.sql",
+					"V005__worker_receipts_and_operations.sql");
 		assertThat(history).allSatisfy((row) -> assertThat(row).containsEntry("success", true));
 		assertThat(flyway.info().pending()).isEmpty();
 	}
@@ -48,6 +49,62 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 
 		assertThat(baseline).isEqualTo("m1-foundation");
 		assertThat(coreDomain).isEqualTo("m2-phase1");
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT metadata_value FROM platform_metadata WHERE metadata_key = 'schema.worker_receipts'",
+				String.class))
+			.isEqualTo("m2-phase2c");
+	}
+
+	@Test
+	void workerAndOperatorObjectsLiveInTheirOwnSchemas() {
+		List<String> tables = jdbcTemplate.queryForList("""
+				SELECT table_schema || '.' || table_name FROM information_schema.tables
+				WHERE table_schema IN ('worker', 'ops') ORDER BY 1
+				""", String.class);
+
+		assertThat(tables).containsExactly("ops.recovery_actions", "worker.delivery_rejections",
+				"worker.processing_receipts");
+	}
+
+	@Test
+	void privilegedFunctionsAreHardenedAndNotExecutableByPublic() {
+		List<Map<String, Object>> functions = jdbcTemplate.queryForList("""
+				SELECT n.nspname || '.' || p.proname AS name, p.prosecdef AS definer,
+				       array_to_string(p.proconfig, ',') AS config,
+				       EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+				               WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE') AS public_execute
+				FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+				WHERE n.nspname IN ('worker', 'ops')
+				""");
+
+		assertThat(functions).extracting((row) -> row.get("name"))
+			.containsExactlyInAnyOrder("worker.note_rejection", "worker.record_receipt", "ops.outbox_summary",
+					"ops.list_failed_outbox_events", "ops.requeue_failed_outbox_events",
+					"ops.record_dead_letter_replay");
+		assertThat(functions).allSatisfy((row) -> {
+			assertThat(row).containsEntry("definer", true)
+				.containsEntry("config", "search_path=pg_catalog, pg_temp")
+				.containsEntry("public_execute", false);
+		});
+	}
+
+	@Test
+	void workerAndOperatorGroupRolesCannotLogIn() {
+		List<Map<String, Object>> roles = jdbcTemplate.queryForList("""
+				SELECT rolname, rolcanlogin, rolsuper FROM pg_roles
+				WHERE rolname IN ('sentinel_worker', 'sentinel_operator') ORDER BY rolname
+				""");
+
+		assertThat(roles).hasSize(2).allSatisfy((row) -> {
+			assertThat(row).containsEntry("rolcanlogin", false).containsEntry("rolsuper", false);
+		});
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT has_table_privilege('sentinel_worker', 'public.scans', 'SELECT')", Boolean.class))
+			.isFalse();
+		assertThat(jdbcTemplate.queryForObject(
+				"SELECT has_function_privilege('sentinel_worker', 'worker.record_receipt(jsonb)', 'EXECUTE')",
+				Boolean.class))
+			.isTrue();
 	}
 
 	@Test

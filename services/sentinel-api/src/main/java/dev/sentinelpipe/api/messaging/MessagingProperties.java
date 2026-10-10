@@ -57,6 +57,17 @@ public class MessagingProperties {
 		/** Maximum wait for a broker publisher confirm. */
 		private Duration confirmTimeout = Duration.ofSeconds(10);
 
+		/** Oldest pending event age above which the {@code outbox} health is DOWN. */
+		private Duration maxPendingAge = Duration.ofMinutes(15);
+
+		public Duration getMaxPendingAge() {
+			return this.maxPendingAge;
+		}
+
+		public void setMaxPendingAge(Duration maxPendingAge) {
+			this.maxPendingAge = maxPendingAge;
+		}
+
 		public boolean isPublisherEnabled() {
 			return this.publisherEnabled;
 		}

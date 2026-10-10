@@ -83,13 +83,30 @@ The current version implements the following controls:
 - **Messaging:** scan requests reach the worker through a transactional outbox and RabbitMQ
   (ADR-0004). Events are built from committed server-side state and contain no tokens,
   credentials or user identities. The worker treats messages as untrusted input: bounded
-  size, strict JSON, schema and AMQP property validation. A durable receipt is committed
-  before acknowledgement; a reused `event_id` with different content is dead-lettered as
-  possible tampering and never overwrites the original receipt. Messages are never
-  authorization credentials. The worker connects with its own broker user that can only
-  read its queue and write to the retry and dead-letter exchanges. Failed publications and
-  dead letters are retained for recovery (docs/runbooks/messaging.md); nothing is silently
-  dropped. Logs and metrics contain identifiers and outcome codes only, never payloads.
+  size, strict JSON, schema and AMQP property validation. Receipts are shared in PostgreSQL
+  and committed before acknowledgement. A message is accepted only if it is byte-identical
+  to the committed outbox payload and matches the authoritative scan, project and
+  organization (ADR-0005). Payload tenant identifiers are never trusted, and forged or
+  altered messages are dead-lettered and recorded for forensics. Messages are never
+  authorization credentials. Failed publications and dead letters are retained for
+  recovery (docs/runbooks/messaging.md); the dead-letter queue has an unlimited delivery
+  limit, so nothing is silently dropped. Logs and metrics contain identifiers and outcome
+  codes only, never payloads, and metric labels are fixed low-cardinality enumerations.
+- **Least-privilege runtime identities:** the API publishes as `sentinel-publisher`
+  (write `sentinel.scan-requests` only). The worker can only read its queue and write the
+  retry and dead-letter exchanges. No runtime user can configure topology or use the
+  management interface; topology is provisioned separately by an administrator. In
+  PostgreSQL, the worker role may only execute `worker.record_receipt` and the operator
+  role only the `ops.*` recovery functions. Both are `SECURITY DEFINER` functions with a
+  fixed `search_path`, and `EXECUTE` is revoked from `PUBLIC`.
+- **Recovery:** operator actions (requeue FAILED outbox events, dead-letter replay) are CLI
+  commands with separate operator credentials, bounded to 100 items per call and audited
+  in `ops.recovery_actions` before they take effect. There are no recovery HTTP endpoints.
+- **Metrics exposure:** no metrics endpoint is exposed by default. The API's Prometheus
+  endpoint and the worker's exposition server can only be enabled on a loopback address,
+  and for the API only on a separate management port; startup fails otherwise.
+- **Idempotency keys** expire after a documented retention (default 24 h). Expired keys
+  never replay, and cleanup never deletes scans, outbox events or receipts.
 - **Database:** the schema is managed exclusively by versioned Flyway migrations. Hibernate
   only validates the schema.
 - **CI:** GitHub Actions runs with a read-only token (`contents: read`). Checkout credentials
@@ -103,11 +120,25 @@ The current version implements the following controls:
   deployment are still missing. It remains disabled by default and loopback-only.
 - Access tokens stay valid until they expire (no revocation or introspection). Membership
   revocation takes effect on the next request. Only one trusted issuer is supported.
-- Queue messages are not signed; their integrity depends on broker access control. The API
-  still uses the Compose administrative broker user. Worker deduplication is per host
-  until a shared receipt store exists. Delivery is at-least-once, not exactly-once.
+- Queue messages are not signed; they are authenticated against the database, so a party
+  that can write both the outbox and the broker could forge a request. Delivery is
+  at-least-once, not exactly-once (acceptance is exactly once per `event_id`).
+- RabbitMQ authorizes `queue.purge` with the read permission: the worker can purge its
+  work queue and the operator the dead-letter queue. The outbox remains the system of
+  record for recovery.
+- The API connects to PostgreSQL as the schema owner (the Compose superuser locally), and
+  `SECURITY DEFINER` functions run as the migration owner. Separate runtime and migration
+  roles are still to be introduced. **This is a blocker before real scanner execution
+  (M3).**
+- Dead-letter replay audit is enforced by the operator CLI, not by the broker: the
+  operator's broker credentials alone can republish or discard dead letters without an
+  audit row. Workers still verify and deduplicate every message.
+- Provisioning passes RabbitMQ passwords to `rabbitmqctl` as process arguments inside the
+  broker container. PostgreSQL role passwords appear in an `ALTER ROLE` statement that
+  the server would log under non-default logging settings or on error. See
+  [messaging runbook §2](docs/runbooks/messaging.md#2-provisioning-least-privilege-identities).
 - Scan `triggerType` and `branch` are caller-supplied and not yet verified against GitHub
-  events or OIDC claims. Idempotency keys do not expire, and there is no rate limiting.
+  events or OIDC claims. There is no rate limiting.
 - The Compose stack is for local development only. It does not use TLS between services, and
   OPA does not authenticate clients.
 - Scanner execution, evidence integrity verification, GitHub webhook and OIDC validation, and

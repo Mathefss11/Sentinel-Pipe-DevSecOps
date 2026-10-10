@@ -64,6 +64,12 @@
 			<groupId>org.flywaydb</groupId>
 			<artifactId>flyway-database-postgresql</artifactId>
 		</dependency>
+		<!-- Prometheus scrape format; the endpoint is not exposed unless explicitly enabled on a
+			loopback-bound management port (MetricsExposureGuard). Version managed by Spring Boot. -->
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-registry-prometheus</artifactId>
+		</dependency>
 
 		<dependency>
 			<groupId>org.postgresql</groupId>

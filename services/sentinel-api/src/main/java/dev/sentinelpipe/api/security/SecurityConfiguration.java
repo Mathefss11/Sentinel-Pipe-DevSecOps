@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnBooleanProp
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -27,6 +28,10 @@ import tools.jackson.databind.json.JsonMapper;
  * memberships (see {@code dev.sentinelpipe.api.authorization.AccessControl}).</li>
  * </ul>
  *
+ * In both modes, the Prometheus scrape endpoint is reachable only on the separate,
+ * loopback-bound management port when explicitly exposed ({@link MetricsExposureGuard}).
+ *
+ * <p>
  * The API is stateless: no sessions, no cookies, no form or basic login. CSRF protection
  * is therefore not applicable and disabled; browsers cannot attach bearer tokens
  * automatically.
@@ -46,14 +51,16 @@ class SecurityConfiguration {
 
 	@Bean
 	@ConditionalOnDomainApiEnabled
-	SecurityFilterChain domainApiSecurityFilterChain(HttpSecurity http, JwtDecoder jwtDecoder, JsonMapper jsonMapper)
-			throws Exception {
+	SecurityFilterChain domainApiSecurityFilterChain(HttpSecurity http, JwtDecoder jwtDecoder, JsonMapper jsonMapper,
+			Environment environment) throws Exception {
 		statelessApi(http);
 		var entryPoint = ProblemSecurityHandlers.bearerEntryPoint(jsonMapper);
 		var accessDenied = ProblemSecurityHandlers.accessDeniedHandler(jsonMapper);
 		http.authorizeHttpRequests((requests) -> requests.dispatcherTypeMatchers(DispatcherType.ERROR)
 			.permitAll()
 			.requestMatchers(HttpMethod.GET, HEALTH_ENDPOINTS)
+			.permitAll()
+			.requestMatchers(MetricsExposureGuard.prometheusScrape(environment))
 			.permitAll()
 			.requestMatchers("/api/**")
 			.authenticated()
@@ -70,11 +77,14 @@ class SecurityConfiguration {
 	@Bean
 	@ConditionalOnBooleanProperty(name = DomainApiExposureGuard.ENABLED_PROPERTY, havingValue = false,
 			matchIfMissing = true)
-	SecurityFilterChain defaultDenySecurityFilterChain(HttpSecurity http, JsonMapper jsonMapper) throws Exception {
+	SecurityFilterChain defaultDenySecurityFilterChain(HttpSecurity http, JsonMapper jsonMapper,
+			Environment environment) throws Exception {
 		statelessApi(http);
 		http.authorizeHttpRequests((requests) -> requests.dispatcherTypeMatchers(DispatcherType.ERROR)
 			.permitAll()
 			.requestMatchers(HttpMethod.GET, HEALTH_ENDPOINTS)
+			.permitAll()
+			.requestMatchers(MetricsExposureGuard.prometheusScrape(environment))
 			.permitAll()
 			.anyRequest()
 			.denyAll())

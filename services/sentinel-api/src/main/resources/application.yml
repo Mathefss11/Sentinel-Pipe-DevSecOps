@@ -22,7 +22,9 @@ spring:
   rabbitmq:
     host: ${SENTINEL_RABBITMQ_HOST:localhost}
     port: ${SENTINEL_RABBITMQ_PORT:5672}
-    username: ${SENTINEL_RABBITMQ_USERNAME:sentinel}
+    # Least-privileged publisher identity (write sentinel.scan-requests only), created by
+    # infrastructure/docker/rabbitmq/provision.sh. Never the broker administrator.
+    username: ${SENTINEL_RABBITMQ_USERNAME:sentinel-publisher}
     password: ${SENTINEL_RABBITMQ_PASSWORD}
     virtual-host: ${SENTINEL_RABBITMQ_VHOST:/}
     # Outbox publication: an event is marked PUBLISHED only after a positive,
@@ -72,7 +74,10 @@ sentinel:
   # asymmetric keys. See ADR-0003.
   # Transactional outbox and RabbitMQ topology (M2 Phase 2B, ADR-0004).
   messaging:
-    declare-topology: true
+    # Topology is provisioned out of band (provision.sh imports definitions.json) with
+    # administrative credentials; the runtime publisher has no configure permission.
+    # Enable only with an administrative broker user (tests, throwaway brokers).
+    declare-topology: false
     outbox:
       publisher-enabled: true
       poll-interval-ms: 1000
@@ -82,6 +87,16 @@ sentinel:
       backoff-initial: 2s
       backoff-max: 5m
       confirm-timeout: 10s
+      # The `outbox` health contributor is DOWN beyond this age (not part of readiness).
+      max-pending-age: 15m
+  # Idempotency-Key lifecycle (IdempotencyProperties): keys replay for `retention`, then
+  # expire; expired keys are released by a bounded periodic cleanup. Scans are never deleted.
+  idempotency:
+    retention: 24h
+    cleanup-enabled: true
+    cleanup-interval: 10m
+    cleanup-batch-size: 500
+    cleanup-max-batches: 20
   security:
     jwt:
       jws-algorithms: RS256
@@ -89,6 +104,11 @@ sentinel:
       clock-skew: 30s
 
 management:
+  # Only health is exposed. Exposing `prometheus` requires a separate management port bound
+  # to a loopback address (MetricsExposureGuard), e.g.
+  #   MANAGEMENT_SERVER_PORT=9464 MANAGEMENT_SERVER_ADDRESS=127.0.0.1
+  #   MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE=health,prometheus
+  # See docs/runbooks/observability.md.
   endpoints:
     web:
       exposure:

@@ -3,6 +3,9 @@
 - **Status:** Accepted (pending owner review)
 - **Date:** 2026-10-09
 - **Milestone:** M2 Phase 2B
+- **Amended by:** [ADR-0005](0005-shared-receipts-tenant-verification-and-least-privilege.md)
+  (Phase 2C): receipts moved from per-host SQLite to shared, database-verified PostgreSQL
+  receipts, and the API publishes with a least-privileged broker user.
 
 ## Context
 

@@ -1,26 +1,30 @@
 """Consumer behaviour against a real RabbitMQ broker (Testcontainers).
 
-The broker image is pinned to the same digest as compose.yaml and the Java tests. The
-topology is declared from packages/contracts/messaging/topology.v1.json (as the control
-plane does), and the consumer runs as a least-privileged user with exactly the
-permissions documented in docs/runbooks/messaging.md.
+These tests exercise the consumer mechanics (acknowledgement, retry, dead-lettering,
+crash recovery) with the development SQLite receipt store. The broker is provisioned by
+the production script (infrastructure/docker/rabbitmq/provision.sh), and the consumer
+runs as the least-privileged worker user it creates. Shared-store, tenant-verification
+and multi-worker behaviour with PostgreSQL is covered in test_distributed_processing.py.
 """
 
 from __future__ import annotations
 
 import json
-import secrets
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pika
 import pika.exceptions
 import pytest
-from broker_diagnostics import diagnosed
-from testcontainers.community.rabbitmq import RabbitMqContainer
+from infrastructure import (
+    ROUTE,
+    TOPOLOGY,
+    Broker,
+    drain,
+    publish,
+    queue_depth,
+)
 
 from sentinel_worker.messaging import contracts
 from sentinel_worker.messaging.consumer import (
@@ -33,173 +37,13 @@ from sentinel_worker.messaging.consumer import (
 )
 from sentinel_worker.messaging.handler import MessageHandler
 from sentinel_worker.messaging.receipts import ReceiptStoreError, SqliteReceiptStore
-from sentinel_worker.messaging.settings import ConsumerSettings
 from support import encode, scan_requested
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("empty_queues")]
 
-# rabbitmq:4.3.6-management-alpine, identical to compose.yaml and TestcontainersConfiguration.
-RABBITMQ_IMAGE = "rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95"
-
-TOPOLOGY = contracts.topology()
-ROUTE = TOPOLOGY["messages"]["scan.requested"]
 DEAD_LETTER_QUEUE = next(
     b["queue"] for b in TOPOLOGY["bindings"] if b["exchange"] == DEAD_LETTER_EXCHANGE
 )
-WORKER_USER = "sentinel-worker"
-# Least privilege: no configure, write only to the dead-letter and retry exchanges, read only
-# the worker queue (see docs/runbooks/messaging.md).
-WORKER_PERMISSIONS = (
-    "^$",
-    r"^sentinel\.scan-requests\.(dlx|retry)$",
-    r"^sentinel\.scan-requests\.worker$",
-)
-
-
-@dataclass(frozen=True)
-class Broker:
-    admin: pika.ConnectionParameters
-    host: str
-    port: int
-    worker_password: str
-
-    def worker_settings(self, receipt_db: Path) -> ConsumerSettings:
-        return ConsumerSettings(
-            host=self.host,
-            port=self.port,
-            virtual_host="/",
-            username=WORKER_USER,
-            password=self.worker_password,
-            receipt_db=receipt_db,
-            prefetch=1,
-        )
-
-    def worker_parameters(self) -> pika.ConnectionParameters:
-        return pika.ConnectionParameters(
-            host=self.host,
-            port=self.port,
-            credentials=pika.PlainCredentials(WORKER_USER, self.worker_password),
-        )
-
-
-def _new_password() -> str:
-    # Hex only. rabbitmqctl parses an argument starting with "-" as an option, and
-    # token_urlsafe() can start with "-": that was the root cause of the intermittent
-    # fixture failure (exit code 64, "Invalid options for this command").
-    return secrets.token_hex(24)
-
-
-def _exec(container: RabbitMqContainer, *command: str, secret: str = "") -> None:
-    result = container.exec(list(command))
-    if result.exit_code != 0:
-        output = result.output.decode("utf-8", errors="replace")
-        if secret:
-            output = output.replace(secret, "<redacted>")
-        # Report the command name and redacted output only; never the arguments.
-        raise RuntimeError(f"{command[0]} {command[1]} exited with {result.exit_code}: {output}")
-
-
-@pytest.fixture(scope="module")
-def broker() -> Iterator[Broker]:
-    admin_password = _new_password()
-    container = RabbitMqContainer(
-        RABBITMQ_IMAGE, username="sentinel-admin", password=admin_password
-    )
-    with diagnosed(container, "container start"):
-        container.start()
-    try:
-        with diagnosed(container, "topology and user provisioning"):
-            admin = container.get_connection_params()
-            connection = pika.BlockingConnection(admin)
-            channel = connection.channel()
-            for exchange in TOPOLOGY["exchanges"]:
-                channel.exchange_declare(
-                    exchange["name"],
-                    exchange_type=exchange["type"],
-                    durable=exchange["durable"],
-                    auto_delete=exchange["auto_delete"],
-                )
-            for queue in TOPOLOGY["queues"]:
-                channel.queue_declare(
-                    queue["name"], durable=queue["durable"], arguments=queue["arguments"]
-                )
-            for binding in TOPOLOGY["bindings"]:
-                channel.queue_bind(
-                    binding["queue"], binding["exchange"], routing_key=binding["routing_key"]
-                )
-            connection.close()
-
-            worker_password = _new_password()
-            _exec(
-                container,
-                "rabbitmqctl",
-                "add_user",
-                WORKER_USER,
-                worker_password,
-                secret=worker_password,
-            )
-            _exec(
-                container,
-                "rabbitmqctl",
-                "set_permissions",
-                "-p",
-                "/",
-                WORKER_USER,
-                *WORKER_PERMISSIONS,
-            )
-        yield Broker(admin, admin.host, int(admin.port), worker_password)
-    finally:
-        container.stop()
-
-
-@pytest.fixture(autouse=True)
-def empty_queues(broker: Broker) -> None:
-    connection = pika.BlockingConnection(broker.admin)
-    channel = connection.channel()
-    for queue in TOPOLOGY["queues"]:
-        channel.queue_purge(queue["name"])
-    connection.close()
-
-
-def publish(broker: Broker, message: dict[str, Any], body: bytes | None = None) -> None:
-    """Publishes like the control plane: persistent, confirmed, mandatory."""
-    connection = pika.BlockingConnection(broker.admin)
-    channel = connection.channel()
-    channel.confirm_delivery()
-    channel.basic_publish(
-        exchange=ROUTE["exchange"],
-        routing_key=ROUTE["routing_key"],
-        body=encode(message) if body is None else body,
-        properties=pika.BasicProperties(
-            message_id=message.get("event_id"),
-            correlation_id=message.get("correlation_id"),
-            type="scan.requested.v1",
-            content_type="application/json",
-            delivery_mode=pika.DeliveryMode.Persistent,
-        ),
-        mandatory=True,
-    )
-    connection.close()
-
-
-def queue_depth(broker: Broker, queue: str) -> int:
-    connection = pika.BlockingConnection(broker.admin)
-    depth = connection.channel().queue_declare(queue, passive=True).method.message_count
-    connection.close()
-    return int(depth)
-
-
-def drain(broker: Broker, queue: str) -> list[tuple[pika.BasicProperties, bytes]]:
-    connection = pika.BlockingConnection(broker.admin)
-    channel = connection.channel()
-    messages = []
-    while True:
-        method, properties, body = channel.basic_get(queue, auto_ack=True)
-        if method is None:
-            break
-        messages.append((properties, body))
-    connection.close()
-    return messages
 
 
 def consume(

@@ -12,6 +12,11 @@ dependencies = [
     "pika>=1.3.2,<2",
     # Validation of messages against packages/contracts JSON Schemas (2020-12).
     "jsonschema>=4.23,<5",
+    # PostgreSQL driver for the shared receipt store and operator tools (binary wheels
+    # bundle libpq, so no system client library is needed).
+    "psycopg[binary]>=3.3,<4",
+    # Prometheus text exposition of worker metrics (off unless a port is configured).
+    "prometheus-client>=0.26,<1",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -23,8 +28,8 @@ classifiers = [
 dev = [
     "pytest>=9.1,<10",
     "ruff>=0.17,<0.18",
-    # Real RabbitMQ broker for integration tests.
-    "testcontainers[rabbitmq]>=4.13,<5",
+    # Real RabbitMQ and PostgreSQL for integration tests.
+    "testcontainers[rabbitmq,postgres]>=4.13,<5",
 ]
 
 [project.scripts]
@@ -40,7 +45,7 @@ packages = ["src/sentinel_worker"]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
-    "integration: requires Docker (real RabbitMQ through Testcontainers)",
+    "integration: requires Docker (real RabbitMQ and/or PostgreSQL through Testcontainers)",
 ]
 xfail_strict = true
 

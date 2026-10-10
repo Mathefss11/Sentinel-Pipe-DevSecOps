@@ -164,8 +164,34 @@ def test_transient_failure_is_retried_through_the_retry_exchange(
     assert published["body"] == encode(message)
     assert published["properties"].headers[RETRY_COUNT_HEADER] == 3
     assert published["properties"].message_id == message["event_id"]
-    assert sleeps == []  # the delay is the retry queue's TTL, not a blocked consumer
+    # The redelivery delay is the retry queue's TTL; the short pause only slows the drain
+    # of the work queue while the receipt store is unavailable.
+    assert sleeps == [consumer_module.STORE_OUTAGE_BACKOFF_INITIAL_SECONDS]
     assert consumer.stats.outcomes == {"retry_scheduled": 1}
+
+
+def test_store_outage_backoff_grows_is_capped_and_resets_after_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    channel = RecordingChannel()
+    consumer, sleeps = make_consumer(tmp_path, channel)
+    original = RecordingStore.record
+    monkeypatch.setattr(RecordingStore, "record", failing_record)
+    for _ in range(6):
+        message = scan_requested()
+        consumer.process(  # type: ignore[arg-type]
+            channel, deliver(), properties(message), encode(message)
+        )
+    monkeypatch.setattr(RecordingStore, "record", original)
+    message = scan_requested()
+    consumer.process(channel, deliver(), properties(message), encode(message))  # type: ignore[arg-type]
+    monkeypatch.setattr(RecordingStore, "record", failing_record)
+    message = scan_requested()
+    consumer.process(channel, deliver(), properties(message), encode(message))  # type: ignore[arg-type]
+
+    cap = consumer_module.STORE_OUTAGE_BACKOFF_MAX_SECONDS
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, cap, cap, 1.0]
+    assert cap < 30  # below the AMQP heartbeat interval
 
 
 def test_exhausted_transient_retries_are_dead_lettered(

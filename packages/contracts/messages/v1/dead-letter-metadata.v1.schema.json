@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sentinelpipe.dev/schemas/messages/v1/dead-letter-metadata.v1.schema.json",
   "title": "Dead-letter metadata v1",
-  "description": "JSON value of the AMQP header x-sentinel-dead-letter that a worker attaches when it dead-letters a message it permanently cannot process. The original message body is preserved unchanged for inspection and replay. Identifier fields are null when they could not be extracted from an invalid message. Never contains credentials or the message body; detail is a fixed, sanitized description. Messages dead-lettered by the broker itself (delivery limit exceeded) carry only RabbitMQ's x-death headers.",
+  "description": "JSON value of the AMQP header x-sentinel-dead-letter that a worker attaches when it dead-letters a message it permanently cannot process. The original message body is preserved unchanged for inspection and replay. Identifier fields are null when they could not be extracted from an invalid message. Never contains credentials or the message body; detail is a fixed, sanitized description. UNKNOWN_EVENT, DIGEST_MISMATCH and RELATIONSHIP_MISMATCH mean the message does not match the authoritative outbox event, scan and project in the control-plane database (possible forgery or tampering); identifiers in this metadata are then untrusted claims. Messages dead-lettered by the broker itself (delivery limit exceeded) carry only RabbitMQ's x-death headers.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -48,6 +48,9 @@
         "SCHEMA_VIOLATION",
         "PROPERTIES_MISMATCH",
         "EVENT_ID_CONFLICT",
+        "UNKNOWN_EVENT",
+        "DIGEST_MISMATCH",
+        "RELATIONSHIP_MISMATCH",
         "TRANSIENT_RETRIES_EXHAUSTED"
       ]
     },

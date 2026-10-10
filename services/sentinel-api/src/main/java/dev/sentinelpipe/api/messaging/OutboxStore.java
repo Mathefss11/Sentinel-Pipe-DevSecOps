@@ -180,4 +180,24 @@ public class OutboxStore {
 		return (count != null) ? count : 0;
 	}
 
+	/** Seconds since the oldest PENDING event was created; 0 when there is none. */
+	@Transactional(readOnly = true)
+	public double oldestPendingAgeSeconds() {
+		Double age = this.jdbc.getJdbcTemplate().queryForObject("""
+				SELECT coalesce(extract(epoch FROM now() - min(created_at)), 0)::double precision
+				FROM outbox_events WHERE status = 'PENDING'
+				""", Double.class);
+		return (age != null) ? Math.max(age, 0) : 0;
+	}
+
+	/** PENDING events claimed by a publisher whose lease has expired. */
+	@Transactional(readOnly = true)
+	public long countExpiredLeases() {
+		Long count = this.jdbc.getJdbcTemplate().queryForObject("""
+				SELECT count(*) FROM outbox_events
+				WHERE status = 'PENDING' AND lease_expires_at IS NOT NULL AND lease_expires_at <= now()
+				""", Long.class);
+		return (count != null) ? count : 0;
+	}
+
 }

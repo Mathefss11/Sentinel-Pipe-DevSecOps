@@ -4,6 +4,10 @@
 # interface (127.0.0.1). Images are pinned to immutable multi-arch index
 # digests; the tag is kept for readability. Credentials come from `.env`
 # (copy `.env.example`); Compose refuses to start if a password is missing.
+#
+# Runtime identities are least-privileged and created by the provisioning scripts
+# (scripts/dev/provision.ps1 or scripts/dev/provision.sh, see README). The broker's
+# administrative user below is for provisioning only and must not be used by services.
 
 name: sentinelpipe
 
@@ -19,6 +23,8 @@ services:
     volumes:
       # PostgreSQL 18+ images keep PGDATA in a major-version subdirectory of /var/lib/postgresql.
       - postgres-data:/var/lib/postgresql
+      # Login-role provisioning script (provision-roles.sh); read-only, no secrets.
+      - ./infrastructure/docker/postgres:/etc/sentinelpipe/postgres:ro
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -34,13 +40,16 @@ services:
     # A stable hostname keeps the RabbitMQ node name, and therefore its data directory, stable across restarts.
     hostname: sentinel-rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: ${SENTINEL_RABBITMQ_USERNAME:-sentinel}
-      RABBITMQ_DEFAULT_PASS: ${SENTINEL_RABBITMQ_PASSWORD:?SENTINEL_RABBITMQ_PASSWORD must be set (see .env.example)}
+      # Administrative user: provisioning only (topology import, runtime users).
+      RABBITMQ_DEFAULT_USER: ${SENTINEL_RABBITMQ_ADMIN_USERNAME:-sentinel-admin}
+      RABBITMQ_DEFAULT_PASS: ${SENTINEL_RABBITMQ_ADMIN_PASSWORD:?SENTINEL_RABBITMQ_ADMIN_PASSWORD must be set (see .env.example)}
     ports:
       - "127.0.0.1:${SENTINEL_RABBITMQ_PORT:-5672}:5672"
       - "127.0.0.1:${SENTINEL_RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
+      # Topology definitions and provisioning script; read-only, no secrets.
+      - ./infrastructure/docker/rabbitmq:/etc/sentinelpipe/rabbitmq:ro
     security_opt:
       - no-new-privileges:true
     healthcheck:

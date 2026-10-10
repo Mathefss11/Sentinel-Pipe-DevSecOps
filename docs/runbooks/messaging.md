@@ -1,188 +1,268 @@
-# Runbook: outbox publication and dead-letter recovery
+# Runbook: outbox publication, worker receipts and recovery
 
-Applies to M2 Phase 2B ([ADR-0004](../adr/0004-transactional-outbox-and-at-least-once-messaging.md)).
-Commands use Windows PowerShell against the local Compose stack; adapt hosts and
-credentials for other environments. Never paste message bodies, tokens or credentials into
-tickets or chat.
+Applies to M2 Phase 2C ([ADR-0004](../adr/0004-transactional-outbox-and-at-least-once-messaging.md),
+[ADR-0005](../adr/0005-shared-receipts-tenant-verification-and-least-privilege.md)). Metrics
+and alerts: [observability runbook](observability.md). Commands use Windows PowerShell
+against the local Compose stack; adapt hosts and credentials for other environments.
+Never paste message bodies, tokens or credentials into tickets or chat.
 
 ## 1. Delivery model in one paragraph
 
 A scan request commits a `scans` row and an `outbox_events` row together. The API's
 publisher sends pending events to `sentinel.scan-requests` and marks them `PUBLISHED`
-after the broker confirms. The worker commits a processing receipt keyed by `event_id`
-before acknowledging. Delivery is **at-least-once**: duplicates are expected and are
-harmless because of the receipt store. Exactly-once delivery is not guaranteed, and events
-are not ordered.
+after the broker confirms. A worker records a receipt in PostgreSQL through
+`worker.record_receipt`, which accepts the message only if it is byte-identical to the
+committed outbox payload and matches the authoritative scan, project and organization,
+and only then acknowledges. Delivery is **at-least-once**: duplicates are expected and
+harmless, because acceptance is unique per `event_id` across all workers. Exactly-once
+delivery is not guaranteed, and events are not ordered. A receipt means *accepted for
+processing*, not *scanned*.
 
-## 2. Provisioning least-privilege broker users (local)
+## 2. Provisioning least-privilege identities
 
-The Compose stack creates one administrative user (`SENTINEL_RABBITMQ_USERNAME`). The
-worker must use its own user. Create it once with a random password taken from the
-environment (so it is not typed literally or kept in shell history; it is briefly visible
-to processes inside the broker container while the command runs):
+Topology and runtime identities are provisioned by an administrator, never by the
+services. With the Compose stack running and `.env` filled in (passwords must not start
+with `-`):
 
 ```powershell
-docker compose exec rabbitmq rabbitmqctl add_user sentinel-worker "$env:SENTINEL_WORKER_RABBITMQ_PASSWORD"
-docker compose exec rabbitmq rabbitmqctl set_permissions -p / sentinel-worker '^$' '^sentinel\.scan-requests\.(dlx|retry)$' '^sentinel\.scan-requests\.worker$'
+docker compose up --detach --wait
+.\scripts\dev\provision.ps1          # Linux/macOS/CI: sh scripts/dev/provision.sh
+# Then start the API (Flyway applies V005), and only then the workers.
 ```
 
-Use a password that does **not start with `-`**. `rabbitmqctl` parses such an argument as
-an option and fails with exit code 64 (`Invalid options for this command`). Hexadecimal
-passwords avoid this. The same pitfall caused an intermittent test-fixture failure; see §9.
+Order matters: the API no longer declares the topology, so provisioning must precede its
+first publish (otherwise publishes fail and count as attempts). The role script works
+before or after the migrations (V005 and the script both create the group roles if
+missing), but workers need V005 applied before they connect.
 
-| User | configure | write | read |
-|---|---|---|---|
-| `sentinel-worker` | none (`^$`) | `sentinel.scan-requests.dlx`, `sentinel.scan-requests.retry` | `sentinel.scan-requests.worker` |
-| API (target) | `^sentinel\.scan-requests.*` (only while it declares the topology) | `^sentinel\.scan-requests.*` | `^sentinel\.scan-requests.*` |
+The scripts run, inside the containers, `infrastructure/docker/rabbitmq/provision.sh`
+(imports `definitions.json` and creates the broker users) and
+`infrastructure/docker/postgres/provision-roles.sh` (creates the login roles). Both are
+idempotent; re-run them to rotate a password. Neither script prints a secret, and CI uses
+only the placeholder values of `.env.example`.
 
-The worker permissions are enforced by the worker's integration tests. With them, the
-worker **cannot** publish scan requests, declare or delete queues, or read the dead-letter
-queue. The API currently still uses the Compose administrative user; restricting it is
-tracked as remaining work. Set `sentinel.messaging.declare-topology=false` when the
-topology is provisioned out of band so the API needs no configure permission.
+**Credential exposure during provisioning (accepted, local scope):**
+
+- Secrets reach the containers as environment variables of `docker compose exec -e NAME`,
+  never as command-line arguments on the host.
+- `rabbitmqctl add_user` / `change_password` receive the password as a **process
+  argument inside the broker container** (reading it from standard input hung in
+  testing). While the command runs, any process in that container, or a host user
+  allowed to inspect container processes (`docker top`, root), can read it. RabbitMQ
+  does not log the password.
+- PostgreSQL receives the password inside an `ALTER ROLE … PASSWORD` statement over the
+  local socket (psql reads it with `\getenv`, not from arguments). It is stored as a
+  SCRAM hash, but it **would be written to the server log** if `log_statement` were set
+  to `ddl`/`all` or the statement failed (`log_min_error_statement`). Keep the defaults
+  while provisioning, and do not reuse these passwords.
+
+For production, create users through a secrets-aware mechanism instead (for example a
+pre-hashed `password_hash` in broker definitions and pre-hashed SCRAM verifiers), which
+this phase does not implement.
+
+| Identity | RabbitMQ configure / write / read | PostgreSQL |
+|---|---|---|
+| `sentinel-publisher` (API) | `^$` / `^sentinel\.scan-requests$` / `^$` | API uses the schema owner (see §10) |
+| `sentinel-worker` | `^$` / `^sentinel\.scan-requests\.(dlx\|retry)$` / `^sentinel\.scan-requests\.worker$` | `sentinel_worker_app` ∈ `sentinel_worker`: EXECUTE `worker.record_receipt` only |
+| `sentinel-operator` (on-call only) | `^$` / `^sentinel\.scan-requests$` / `^sentinel\.scan-requests\.dead-letter$` | `sentinel_operator_app` ∈ `sentinel_operator`: EXECUTE `ops.*` only |
+| Broker admin (`SENTINEL_RABBITMQ_ADMIN_*`) | provisioning only | — |
+
+No runtime user has a management tag or the configure permission, so none can declare,
+delete or rebind topology. This is enforced by tests in both services and checked in CI
+(`scripts/ci/verify-broker-permissions.sh`). The API defaults to
+`sentinel.messaging.declare-topology=false`.
+
+**Upgrading an existing local stack from Phase 2B.** In Phase 2B,
+`SENTINEL_RABBITMQ_USERNAME/PASSWORD` were the broker administrator *and* the API's
+identity. They now mean the publisher only. Do the steps in this order:
+
+1. Stop the API and any worker. Leave the Compose stack (and its volumes) as they are.
+2. In `.env`, **copy** the current `SENTINEL_RABBITMQ_USERNAME` and
+   `SENTINEL_RABBITMQ_PASSWORD` values to the new `SENTINEL_RABBITMQ_ADMIN_USERNAME` and
+   `SENTINEL_RABBITMQ_ADMIN_PASSWORD`. The broker volume keeps that administrator:
+   `RABBITMQ_DEFAULT_*` applies only when the volume is first created. Compose refuses to
+   start while `SENTINEL_RABBITMQ_ADMIN_PASSWORD` is unset.
+3. Set `SENTINEL_RABBITMQ_USERNAME=sentinel-publisher` with a new password, and set the
+   same pair in `SENTINEL_RABBITMQ_PUBLISHER_USERNAME/PASSWORD` (the API reads the first
+   pair, the provisioning script the second).
+4. Add the remaining new variables from `.env.example`: `SENTINEL_WORKER_RECEIPT_BACKEND`,
+   `SENTINEL_WORKER_DB_*`, `SENTINEL_OPERATOR_*` and, optionally,
+   `SENTINEL_WORKER_METRICS_*`. Keep the existing `SENTINEL_WORKER_RABBITMQ_*` user: the
+   script resets its permissions to the exact pattern above.
+5. `docker compose up --detach --wait` (recreates the containers with the new read-only
+   mounts), then run the provisioning script. It uses `rabbitmqctl` inside the container
+   and needs no AMQP credentials.
+6. Start the API, then confirm `schema.worker_receipts = m2-phase2c` in
+   `platform_metadata`, then start the workers.
+
+The Phase 2B administrator keeps full broker rights and is now used only for
+provisioning. Receipts in the old SQLite file are **not** migrated. A message still in
+the queues that was already accepted under Phase 2B will be accepted once more in
+PostgreSQL (one extra receipt; nothing is executed). Drain the work queue before
+upgrading if that matters.
 
 ## 3. Signals to watch
 
-| Signal | Where | Meaning / action |
-|---|---|---|
-| `sentinel.outbox.events{status=pending}` grows | API metrics (Micrometer) | Broker unreachable or publisher not running. See §4. |
-| `sentinel.outbox.events{status=failed}` > 0 | API metrics | Events exhausted their attempts. See §5. |
-| `sentinel.outbox.publications{outcome=retry_scheduled,reason=…}` | API metrics | Transient publication failures, by sanitized reason. |
-| `sentinel.outbox.publications{outcome=lease_lost}` | API metrics | A publisher was too slow; the event may be delivered twice (harmless). Increase `lease-duration` if frequent. |
-| `outbox.failed` / `outbox.abandoned_final_attempts` log lines | API logs | Terminal failures, with `event_id` and `correlation_id`. |
-| `message.processed` with `outcome=dead_lettered` | Worker logs (JSON) | A message was dead-lettered; `failure_code` says why. See §6. |
-| `sentinel.scan-requests.dead-letter` depth > 0 | RabbitMQ management UI (`http://127.0.0.1:15672`) | Messages need inspection. |
-| `sentinel.scan-requests.retry` depth stays > 0 | Management UI | The worker's receipt store keeps failing. Check worker disk and permissions. |
-
-Metrics are registered in the API's Micrometer registry. Only `/actuator/health` is
-exposed over HTTP today; exposing a metrics endpoint (for example Prometheus) is an M7 task.
+See the [observability runbook](observability.md) for metric names and alert thresholds.
+In logs, look for `outbox.retry_scheduled`, `outbox.failed`, `outbox.lease_lost` (API) and
+`message.processed` with `outcome=dead_lettered` or `receipt_store.unavailable` (worker).
 
 ## 4. Pending events are not being published
 
 1. Check broker reachability and the API logs for `outbox.retry_scheduled reason=…`:
-   - `BROKER_UNAVAILABLE`: the broker is down or credentials are wrong;
+   - `BROKER_UNAVAILABLE`: the broker is down or the publisher credentials are wrong;
    - `NACK`: the work queue is full (`x-max-length` with `reject-publish`). Scale workers
      or investigate why they are not consuming;
-   - `UNROUTABLE`: topology missing (queue or binding deleted). Restart the API with
-     `declare-topology=true`, or provision the topology;
+   - `UNROUTABLE`: topology missing (queue or binding deleted). Re-run the provisioning
+     script; the API cannot (and must not) recreate topology itself;
    - `CONFIRM_TIMEOUT`: the broker is overloaded or the network is degraded.
 2. Fix the cause. No action is needed on the events: they retry with exponential backoff
    (default 2 s doubling to 5 min, 8 attempts).
 
-Inspect without exposing payloads:
+**Expired publisher claims** need no action. A claim is a lease. When a publisher dies,
+its claims expire (`lease-duration`, default 60 s) and any publisher reclaims them
+(`sentinel_outbox_leases_expired` returns to 0). An event whose final attempt was
+abandoned becomes `FAILED` with `LEASE_EXPIRED` (§5).
 
-```sql
-SELECT status, last_error, count(*) FROM outbox_events GROUP BY status, last_error;
-SELECT id, event_type, attempts, last_error, next_attempt_at, lease_owner, lease_expires_at
-FROM outbox_events WHERE status = 'PENDING' ORDER BY next_attempt_at LIMIT 50;
+```powershell
+sentinel-worker outbox-summary      # pending, failed, expired_leases, oldest age (no payloads)
 ```
 
-## 5. Recovering FAILED events
+## 5. Recovering FAILED outbox events
 
-FAILED events are never published automatically. After fixing the cause:
+FAILED events are never published automatically. Fix the cause first.
+`UNKNOWN_EVENT_TYPE` means the running API cannot route the event, so deploy a version
+that can. Then use the audited, bounded operator commands (operator database credentials
+in `SENTINEL_OPERATOR_DB_*`):
 
-```sql
--- Review first.
-SELECT id, event_type, aggregate_id, attempts, last_error, updated_at
-FROM outbox_events WHERE status = 'FAILED' ORDER BY updated_at;
-
--- Requeue one event (repeat per id; prefer targeted requeues over bulk updates).
-UPDATE outbox_events
-SET status = 'PENDING', attempts = 0, next_attempt_at = now(), last_error = NULL, updated_at = now()
-WHERE id = '<event-id>' AND status = 'FAILED';
+```powershell
+sentinel-worker outbox-list-failed --limit 20
+sentinel-worker outbox-requeue-failed --operator alice --reason "INC-42 broker outage" --event-id <uuid>
+sentinel-worker outbox-requeue-failed --operator alice --reason "INC-42 broker outage" --limit 10
 ```
 
-This is the same operation as `OutboxStore.requeueFailed` (covered by tests). Requeueing
-is safe even if the event had actually reached the broker earlier, because consumers
-deduplicate by `event_id`. `UNKNOWN_EVENT_TYPE` means the running API version cannot route
-the event: deploy a version that can before requeueing.
+Each requeued event is written to `ops.recovery_actions` (operator, reason, database user,
+time, event id) in the same transaction, at most 100 per call. Requeueing is safe even if
+the event reached the broker earlier: workers deduplicate by `event_id`. Do not update
+`outbox_events` by hand; the operator role cannot, and direct changes are not audited.
 
 ## 6. Dead-lettered messages
 
 Every message in `sentinel.scan-requests.dead-letter` keeps its **original body** and
-properties. Worker-dead-lettered messages carry an `x-sentinel-dead-letter` header
-(`packages/contracts/messages/v1/dead-letter-metadata.v1.schema.json`). Broker-dead-lettered
-messages (delivery limit reached by a crashing consumer) carry RabbitMQ's
-`x-first-death-reason: delivery_limit`.
+properties. Worker dead letters carry `x-sentinel-dead-letter`
+(`dead-letter-metadata.v1`). Broker dead letters from a consumer crash loop carry
+`x-first-death-reason: delivery_limit`. The queue has an unlimited delivery limit (policy
+`sentinel-dead-letter-retention`), so inspecting or failed replays never drop messages.
 
 | `failure_code` / reason | Cause | Action |
 |---|---|---|
-| `MESSAGE_TOO_LARGE`, `INVALID_ENCODING`, `INVALID_JSON`, `SCHEMA_VIOLATION`, `PROPERTIES_MISMATCH` | Message not produced by a compatible control plane, or a contract mismatch between versions | **Do not replay.** Investigate the producer. Messages that did not come from the API indicate a broker access-control problem. |
-| `EVENT_ID_CONFLICT` | Same `event_id` as an already processed but *different* message (possible tampering or replay with altered tenant) | **Do not replay.** Treat as a security event: compare with the outbox row (`SELECT payload FROM outbox_events WHERE id = …`) and review broker users and permissions. |
-| `TRANSIENT_RETRIES_EXHAUSTED` | Worker receipt store unavailable for every retry | Fix the worker (disk, permissions), then replay. |
-| `delivery_limit` (broker) | Consumers crashed repeatedly on this message | Find the crash in worker logs (`correlation_id`), fix, then replay. |
+| `MESSAGE_TOO_LARGE`, `INVALID_ENCODING`, `INVALID_JSON`, `SCHEMA_VIOLATION`, `PROPERTIES_MISMATCH` | Not produced by a compatible control plane | **Do not replay.** Investigate the producer and broker access. |
+| `UNKNOWN_EVENT`, `DIGEST_MISMATCH`, `RELATIONSHIP_MISMATCH`, `EVENT_ID_CONFLICT` | The message does not match the committed outbox event: **possible forgery or tampering** | **Security event. Do not replay.** Compare `original_message_sha256` with `worker.delivery_rejections`, review broker users and credential exposure, preserve the message. |
+| `TRANSIENT_RETRIES_EXHAUSTED` | Receipt store (PostgreSQL) unavailable for every retry | Fix the database, then replay. |
+| `delivery_limit` (broker) | Consumers crashed repeatedly on this message | Fix the crash (worker logs, `correlation_id`), then replay. |
 
-**Inspect** in the management UI (*Queues → sentinel.scan-requests.dead-letter → Get
-messages*). Use *Ack mode: Nack message requeue true* so that inspecting does not remove
-the message.
+**Inspect** without consuming: `sentinel-worker dlq-depth`, or the management UI
+(*Get messages*, ack mode *Nack message requeue true*).
 
-**Replay** after fixing the cause: move messages back to `sentinel.scan-requests` with
-routing key `scan.requested.v1`, for example with the management UI's *Move messages*
-(shovel plugin), or by republishing the original body and properties *without* the
-`x-sentinel-dead-letter` and `x-sentinel-retry-count` headers. Replay is safe because the
-worker deduplicates by `event_id`. If the scan was already processed, the replay is
-acknowledged as a duplicate.
+**Replay** (operator credentials: `SENTINEL_OPERATOR_RABBITMQ_*` and `SENTINEL_OPERATOR_DB_*`):
 
-**Discard** only after recording the `event_id`, `failure_code` and reason in the incident
-log. Never discard `EVENT_ID_CONFLICT` messages before the security review.
+```powershell
+sentinel-worker dlq-replay --operator alice --reason "INC-43 database outage" --max-messages 10
+```
 
-## 7. Duplicate processing
+Replay takes messages oldest first. For each message it **commits an audit row first**
+(`ops.recovery_actions`: operator, reason, event id, message digest, failure code), then
+republishes it persistently with publisher confirms to `sentinel.scan-requests` (dropping
+the retry counter and broker death headers, adding `x-sentinel-replay-audit-id`), and
+only then acknowledges the dead-letter copy. If the audit or the publish fails, the
+message stays in the dead-letter queue and the run stops. Replay never bypasses
+verification: a replayed message is checked by `worker.record_receipt` like any other.
+An already accepted event becomes a duplicate, and a tampered message is dead-lettered
+again. The queue is FIFO, so move security-relevant messages aside (management UI
+*Move messages* to a quarantine queue created by an administrator) before replaying
+those behind them.
 
-Expected sources: publisher crash after the broker confirm and before marking PUBLISHED,
-lease takeover (`lease_lost`), consumer crash after committing the receipt, and replays.
-Each worker host deduplicates through its receipt store
-(`SENTINEL_WORKER_RECEIPT_DB`, default `.sentinel-worker/receipts.sqlite3`). Back it up
-with the host. Deleting it re-enables processing of already-seen events.
+**Discard** only after recording the `event_id`, `failure_code` and reason in the
+incident log. Never discard tampering-class messages before the security review.
 
-## 8. Known limitations
+## 7. Worker restart, redelivery and duplicates
 
-### Why the SQLite receipt store does not support horizontally scaled workers
+Workers are stateless; all deduplication state is in PostgreSQL. Restarting or replacing
+a worker, or running several, is safe. Unacknowledged messages are redelivered to any
+worker. A message whose receipt was committed before a crash is acknowledged as a
+`duplicate`. Expected duplicate sources: publisher crash after the broker confirm, lease
+takeover, consumer crash after commit, and replays.
 
-The store gives exactly-once *acceptance* per `event_id` **within one host**: concurrent
-worker processes on the same host share the file safely (WAL journal, `BEGIN IMMEDIATE`
-transactions; tested by `test_concurrent_stores_on_one_file_agree`). It is not sufficient
-across hosts or containers:
+## 8. Database outage
 
-1. **Deduplication is per store.** RabbitMQ redelivers an unacknowledged message to *any*
-   consumer. If worker A commits a receipt and dies before acking, the redelivery may go to
-   worker B, whose store has never seen the event, so B accepts it again. Every
-   at-least-once duplicate (publisher crash after confirm, lease takeover, replay) can
-   reach a different worker the same way.
-2. **Tamper detection is per store.** `EVENT_ID_CONFLICT` only fires on the worker that
-   holds the original receipt. A conflicting message delivered to another worker is
-   accepted there.
-3. **Sharing the file is not a fix.** SQLite's documentation warns against network file
-   systems (NFS, SMB) because their locking is unreliable, and WAL mode requires shared
-   memory on a single host. Several containers mounting one volume on different hosts
-   could corrupt the database or break the uniqueness guarantee.
-4. **State is tied to the host's disk.** Losing or recreating the worker's volume (for
-   example ephemeral containers) loses the deduplication history, and old events are
-   accepted again if replayed.
+- **API:** scan requests fail (no partial state is committed). The publisher logs
+  `outbox.run_failed` and resumes when the database returns. Gauges report NaN.
+- **Worker:** `worker.record_receipt` cannot commit, so the message is **not
+  acknowledged as accepted**. It goes to the retry queue (15 s), up to 5 retries, then to
+  the dead-letter queue as `TRANSIENT_RETRIES_EXHAUSTED`. The consumer backs off between
+  messages (1 s doubling to 10 s) to slow that drain. Connections use a 5 s connect
+  timeout and 5 s statement and lock timeouts. A commit whose outcome is unknown (the
+  connection was lost during `COMMIT`) is treated as a failure; the retry then reports
+  `duplicate` if it had committed.
+- **After recovery:** replay `TRANSIENT_RETRIES_EXHAUSTED` dead letters (§6).
 
-Today this is safe only because processing is acceptance without side effects and a single
-worker process per host is the documented deployment. Before running several worker
-instances, or before receipts trigger side effects such as scanner execution, the receipt
-store must move to a shared database with a unique `event_id` constraint (next phase). No
-correctness defect was found for the single-host deployment.
+## 9. RabbitMQ outage
 
-### Other limitations
-- Messages are not signed. Integrity depends on broker access control.
-- Retries use a fixed delay (retry-queue TTL, 15 s) rather than exponential backoff.
-- No automated alerting yet (M7).
+- **API:** publications fail with `BROKER_UNAVAILABLE` or `CONFIRM_TIMEOUT`. Events stay
+  `PENDING` in PostgreSQL with backoff and become `FAILED` after 8 attempts (about 10 min
+  with defaults). Requeue them after recovery (§5). Scan creation is unaffected.
+- **Worker:** the consumer stops and must be restarted (process supervisor). Unacked
+  deliveries are redelivered after recovery and deduplicated.
+- Quorum queues are durable; messages confirmed before the outage are not lost.
 
-## 9. Test infrastructure diagnostics
+## 10. Known limitations
 
-The worker's RabbitMQ integration tests wrap broker startup and provisioning in
-`tests/integration/broker_diagnostics.py`. On any failure they print a full report (exception
-chain, Docker engine version, container state, last 400 broker log lines, library
-versions) to stderr and write it to `$SENTINEL_TEST_DIAGNOSTICS_DIR` (default
-`services/sentinel-worker/.test-diagnostics/`, git-ignored). The container environment is
-excluded because it contains credentials.
+- **At-least-once delivery remains.** Each crash window costs at most a duplicate, which
+  receipts absorb. Exactly-once *acceptance* per `event_id` is guaranteed by the database
+  primary key, not by the broker.
+- **Messages are authenticated against the database, not signed.** A forged or altered
+  message is rejected unless the attacker can also write `outbox_events`.
+- **Read includes purge.** RabbitMQ authorizes `queue.purge` with the read permission.
+  The worker can purge the work queue and the operator can purge the dead-letter queue;
+  vhost permissions cannot separate consuming from purging. Mitigations: operator
+  credentials only for on-call staff, broker audit logs, and the outbox as the system of
+  record (purged work can be re-published by requeueing outbox events).
+- **Queue depths** are not visible to the least-privileged API identity; use the broker's
+  Prometheus metrics.
+- **The API still connects to PostgreSQL as the schema owner** (the Compose superuser
+  locally), and `SECURITY DEFINER` functions run as the migration owner. A compromise of
+  the API process therefore yields full control of the database, including receipts and
+  audit rows. **This blocks real scanner execution (M3):** before scanners run, the API
+  needs a separate runtime role (DML on its own tables only), and migrations and the
+  definer functions need a dedicated non-superuser owner.
+- **Audit is enforced by the tools, not by the broker.** The operator's broker
+  credentials alone allow publishing to `sentinel.scan-requests`, consuming from or
+  purging the dead-letter queue without an `ops.recovery_actions` row. Deduplication
+  still holds: workers verify every message, including replays, against the outbox and
+  receipts. The outbox requeue path is enforced in the database (the operator role has
+  no table privileges).
+- **Digest binding to `jsonb` rendering:** in-flight messages across a PostgreSQL major
+  upgrade that changes `jsonb` text output would be rejected (fail closed); republish
+  after the upgrade.
+- `worker.delivery_rejections` and `ops.recovery_actions` grow without automatic
+  retention; review and archive them periodically (no automated deletion of evidence).
+- Retries use a fixed 15 s delay (retry-queue TTL); the in-process backoff only slows the
+  drain.
+- The SQLite receipt store (`SENTINEL_WORKER_RECEIPT_BACKEND=sqlite`, development only)
+  deduplicates per host and performs no tenant verification. It is refused in `ci` and
+  `production`.
 
-**Investigated incident (M2 Phase 2B review):** the previously observed intermittent
-failure (all integration tests erroring in about 5 s) was reproduced twice in 15
-repeated runs with full logs. In both runs `rabbitmqctl add_user` exited with code 64,
-`Invalid options for this command`, because the randomly generated test password
-(`secrets.token_urlsafe`) began with `-`. That happens with probability 1/64 per run. The
-fixture now uses hexadecimal passwords and never echoes command arguments. It previously
-printed part of the password in the assertion output; it now redacts it.
+## 11. Test infrastructure diagnostics
+
+The worker's integration tests provision RabbitMQ and PostgreSQL with the production
+scripts (`tests/integration/infrastructure.py`). Broker startup and provisioning are
+wrapped in `tests/integration/broker_diagnostics.py`. On any failure they print a full
+report (exception chain, Docker engine version, container state, last 400 broker log
+lines, library versions) to stderr and write it to `$SENTINEL_TEST_DIAGNOSTICS_DIR`
+(default `services/sentinel-worker/.test-diagnostics/`, git-ignored). The container
+environment is excluded because it contains credentials.
+
+**Investigated incident (M2 Phase 2B review):** an intermittent fixture failure was caused
+by randomly generated passwords starting with `-`, which `rabbitmqctl` parses as an
+option (exit code 64). Test passwords are hexadecimal, the provisioning script rejects
+passwords starting with `-`, and command output is redacted.

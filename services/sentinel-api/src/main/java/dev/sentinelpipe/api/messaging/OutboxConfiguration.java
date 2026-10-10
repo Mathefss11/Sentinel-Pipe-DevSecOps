@@ -19,6 +19,12 @@ class OutboxConfiguration {
 		return new OutboxMetrics(registry, store);
 	}
 
+	/** Contributes {@code outbox} to the aggregate health status (not to readiness). */
+	@Bean
+	OutboxHealthIndicator outboxHealthIndicator(OutboxStore store, MessagingProperties properties) {
+		return new OutboxHealthIndicator(store, properties.getOutbox().getMaxPendingAge());
+	}
+
 	@Bean
 	OutboxPublisher outboxPublisher(OutboxStore store, RabbitTemplate rabbitTemplate, MessagingProperties properties,
 			OutboxMetrics metrics) {

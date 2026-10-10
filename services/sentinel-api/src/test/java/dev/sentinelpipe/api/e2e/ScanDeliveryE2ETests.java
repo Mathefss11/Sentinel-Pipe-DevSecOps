@@ -12,9 +12,7 @@ import dev.sentinelpipe.api.messaging.MessagingTopology;
 import dev.sentinelpipe.api.messaging.OutboxPublisher;
 import dev.sentinelpipe.api.messaging.OutboxStore;
 import io.micrometer.core.instrument.MeterRegistry;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -25,18 +23,28 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageBuilder;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.testcontainers.containers.Container.ExecResult;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.rabbitmq.RabbitMQContainer;
+import org.testcontainers.utility.MountableFile;
 import tools.jackson.databind.JsonNode;
 
 /**
  * End to end across both services: authenticated scan request (Java, PostgreSQL) →
  * transactional outbox → publisher with confirms → RabbitMQ → the real Python worker
- * process → durable receipt (SQLite).
+ * process → shared receipt in PostgreSQL ({@code worker.processing_receipts}), verified
+ * by the database against the committed outbox event.
+ * <p>
+ * Broker users come from the production provisioning script (provision.sh); the worker
+ * and operator connect to PostgreSQL with login roles that are members of the
+ * {@code sentinel_worker} and {@code sentinel_operator} group roles from Flyway V005.
  *
  * <p>
  * Runs only in the {@code e2e} Maven profile and requires
@@ -45,12 +53,28 @@ import tools.jackson.databind.JsonNode;
  */
 class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 
-	private static final String WORKER_USER = "sentinel-worker-e2e";
+	private static final String WORKER_USER = "sentinel-worker";
 
-	private static final String WORKER_PASSWORD = "e2e-" + UUID.randomUUID();
+	private static final String OPERATOR_USER = "sentinel-operator";
+
+	// No leading "-": rabbitmqctl would parse such an argument as an option.
+	private static final String WORKER_PASSWORD = "e2e" + UUID.randomUUID().toString().replace("-", "");
+
+	private static final String OPERATOR_PASSWORD = "e2o" + UUID.randomUUID().toString().replace("-", "");
+
+	private static final String WORKER_DB_USER = "sentinel_worker_e2e";
+
+	private static final String OPERATOR_DB_USER = "sentinel_operator_e2e";
+
+	private static final Path RABBITMQ_PROVISIONING = Path.of("..", "..", "infrastructure", "docker", "rabbitmq")
+		.toAbsolutePath()
+		.normalize();
 
 	@Autowired
 	private RabbitMQContainer rabbit;
+
+	@Autowired
+	private PostgreSQLContainer postgres;
 
 	@Autowired
 	private ConnectionFactory connectionFactory;
@@ -70,8 +94,6 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 	@Autowired
 	private NamedParameterJdbcTemplate namedParameterJdbcTemplate;
 
-	private Path receiptDb;
-
 	private static String python() {
 		String python = System.getProperty("sentinel.e2e.python", "");
 		if (python.isBlank() || python.contains("${")) {
@@ -88,15 +110,24 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 		admin.purgeQueue(MessagingTopology.SCAN_REQUESTS_QUEUE, false);
 		admin.purgeQueue(MessagingTopology.DEAD_LETTER_QUEUE, false);
 		admin.purgeQueue(MessagingTopology.RETRY_QUEUE, false);
-		// Least-privileged worker user, exactly as documented in docs/runbooks/messaging.md.
-		this.rabbit.execInContainer("rabbitmqctl", "delete_user", WORKER_USER);
-		assertThat(this.rabbit.execInContainer("rabbitmqctl", "add_user", WORKER_USER, WORKER_PASSWORD).getExitCode())
-			.isZero();
-		assertThat(this.rabbit
-			.execInContainer("rabbitmqctl", "set_permissions", "-p", "/", WORKER_USER, "^$",
-					"^sentinel\\.scan-requests\\.(dlx|retry)$", "^sentinel\\.scan-requests\\.worker$")
-			.getExitCode()).isZero();
-		this.receiptDb = Files.createTempDirectory("sentinel-e2e").resolve("receipts.sqlite3");
+		// Least-privileged broker users from the production provisioning script.
+		for (String file : new String[] { "provision.sh", "definitions.json" }) {
+			this.rabbit.copyFileToContainer(MountableFile.forHostPath(RABBITMQ_PROVISIONING.resolve(file)),
+					"/etc/sentinelpipe/rabbitmq/" + file);
+		}
+		ExecResult provisioned = this.rabbit.execInContainer("sh", "-c",
+				"SENTINEL_RABBITMQ_PUBLISHER_PASSWORD=p" + WORKER_PASSWORD + " SENTINEL_WORKER_RABBITMQ_PASSWORD="
+						+ WORKER_PASSWORD + " SENTINEL_OPERATOR_RABBITMQ_PASSWORD=" + OPERATOR_PASSWORD
+						+ " sh /etc/sentinelpipe/rabbitmq/provision.sh");
+		assertThat(provisioned.getExitCode()).as("provision.sh").isZero();
+		// Database login roles, members of the group roles created by Flyway V005.
+		loginRole(WORKER_DB_USER, WORKER_PASSWORD, "sentinel_worker");
+		loginRole(OPERATOR_DB_USER, OPERATOR_PASSWORD, "sentinel_operator");
+	}
+
+	private void loginRole(String name, String password, String group) {
+		this.jdbcTemplate.execute("DROP ROLE IF EXISTS " + name);
+		this.jdbcTemplate.execute("CREATE ROLE " + name + " LOGIN PASSWORD '" + password + "' IN ROLE " + group);
 	}
 
 	/** Output of a finished worker process. */
@@ -112,7 +143,14 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 		env.put("SENTINEL_WORKER_RABBITMQ_VHOST", "/");
 		env.put("SENTINEL_WORKER_RABBITMQ_USERNAME", WORKER_USER);
 		env.put("SENTINEL_WORKER_RABBITMQ_PASSWORD", WORKER_PASSWORD);
-		env.put("SENTINEL_WORKER_RECEIPT_DB", this.receiptDb.toString());
+		env.put("SENTINEL_WORKER_RECEIPT_BACKEND", "postgres");
+		env.put("SENTINEL_WORKER_DB_HOST", this.postgres.getHost());
+		env.put("SENTINEL_WORKER_DB_PORT", String.valueOf(this.postgres.getMappedPort(5432)));
+		env.put("SENTINEL_WORKER_DB_NAME", this.postgres.getDatabaseName());
+		env.put("SENTINEL_WORKER_DB_USERNAME", WORKER_DB_USER);
+		env.put("SENTINEL_WORKER_DB_PASSWORD", WORKER_PASSWORD);
+		env.put("SENTINEL_WORKER_DB_SSLMODE", "disable");
+		env.put("SENTINEL_WORKER_ENVIRONMENT", "ci");
 		env.put("SENTINEL_WORKER_LOG_LEVEL", "DEBUG");
 		builder.redirectErrorStream(true);
 		Process process = builder.start();
@@ -121,21 +159,40 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 		return new WorkerRun(process.exitValue(), output);
 	}
 
-	/** Reads receipts with the worker's own interpreter (SQLite from the standard library). */
-	private List<JsonNode> receipts() throws IOException, InterruptedException {
-		// Single line: Windows process-argument quoting does not preserve newlines.
-		String script = "import json, sqlite3, sys; rows = sqlite3.connect(sys.argv[1]).execute("
-				+ "'SELECT receipt_json FROM processing_receipts ORDER BY received_at').fetchall(); "
-				+ "print(json.dumps([json.loads(r[0]) for r in rows]))";
-		Process process = new ProcessBuilder(python(), "-c", script, this.receiptDb.toString())
-			.redirectErrorStream(true)
-			.start();
-		String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).strip();
-		assertThat(process.waitFor(30, TimeUnit.SECONDS)).isTrue();
-		assertThat(process.exitValue()).as(output).isZero();
+	/** Receipts for the given events, read from the shared PostgreSQL store. */
+	private List<JsonNode> receipts(Object... eventIds) {
 		List<JsonNode> receipts = new ArrayList<>();
-		this.jsonMapper.readTree(output).forEach(receipts::add);
+		for (Object eventId : eventIds) {
+			this.jdbcTemplate
+				.queryForList("SELECT receipt::text FROM worker.processing_receipts WHERE event_id = ?::uuid",
+						String.class, eventId.toString())
+				.forEach((json) -> receipts.add(this.jsonMapper.readTree(json)));
+		}
 		return receipts;
+	}
+
+	/** Runs an operator command of the worker CLI with the operator identities. */
+	private WorkerRun runOperator(String... arguments) throws Exception {
+		List<String> command = new ArrayList<>(List.of(python(), "-m", "sentinel_worker"));
+		command.addAll(List.of(arguments));
+		ProcessBuilder builder = new ProcessBuilder(command);
+		Map<String, String> env = builder.environment();
+		env.put("SENTINEL_OPERATOR_RABBITMQ_HOST", this.rabbit.getHost());
+		env.put("SENTINEL_OPERATOR_RABBITMQ_PORT", String.valueOf(this.rabbit.getAmqpPort()));
+		env.put("SENTINEL_OPERATOR_RABBITMQ_USERNAME", OPERATOR_USER);
+		env.put("SENTINEL_OPERATOR_RABBITMQ_PASSWORD", OPERATOR_PASSWORD);
+		env.put("SENTINEL_OPERATOR_DB_HOST", this.postgres.getHost());
+		env.put("SENTINEL_OPERATOR_DB_PORT", String.valueOf(this.postgres.getMappedPort(5432)));
+		env.put("SENTINEL_OPERATOR_DB_NAME", this.postgres.getDatabaseName());
+		env.put("SENTINEL_OPERATOR_DB_USERNAME", OPERATOR_DB_USER);
+		env.put("SENTINEL_OPERATOR_DB_PASSWORD", OPERATOR_PASSWORD);
+		env.put("SENTINEL_WORKER_DB_SSLMODE", "disable");
+		env.put("SENTINEL_WORKER_ENVIRONMENT", "ci");
+		builder.redirectErrorStream(true);
+		Process process = builder.start();
+		String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+		assertThat(process.waitFor(60, TimeUnit.SECONDS)).as("operator command finished").isTrue();
+		return new WorkerRun(process.exitValue(), output);
 	}
 
 	private static Map<String, Object> outcomes(WorkerRun run, tools.jackson.databind.json.JsonMapper mapper) {
@@ -166,7 +223,7 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 
 		assertThat(run.exitCode()).as(run.output()).isZero();
 		assertThat(outcomes(run, this.jsonMapper)).containsEntry("accepted", 1);
-		List<JsonNode> receipts = receipts();
+		List<JsonNode> receipts = receipts(event.get("id"));
 		assertThat(receipts).hasSize(1);
 		JsonNode receipt = receipts.getFirst();
 		ContractSchemas.assertValidMessage("processing-receipt.v1.schema.json", receipt);
@@ -187,6 +244,11 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 			.andExpect(jsonPath("$.executionStatus").value("QUEUED"))
 			.andExpect(jsonPath("$.securityDecision").value("PENDING"));
 		assertThat(workerQueueDepth()).isZero();
+		// The database stored the authoritative relationships, not the payload's claims.
+		assertThat(this.jdbcTemplate.queryForMap(
+				"SELECT organization_id, scan_id FROM worker.processing_receipts WHERE event_id = ?", event.get("id")))
+			.containsEntry("organization_id", organizationId)
+			.containsEntry("scan_id", scanId);
 		// Worker logs contain identifiers only: no credentials, no payload content.
 		assertThat(run.output()).contains(event.get("id").toString())
 			.doesNotContain(WORKER_PASSWORD)
@@ -215,8 +277,63 @@ class ScanDeliveryE2ETests extends AbstractDomainApiIntegrationTest {
 
 		assertThat(run.exitCode()).as(run.output()).isZero();
 		assertThat(outcomes(run, this.jsonMapper)).containsEntry("accepted", 1).containsEntry("duplicate", 1);
-		assertThat(receipts()).hasSize(1);
+		assertThat(receipts(eventId)).hasSize(1);
 		assertThat(workerQueueDepth()).isZero();
+	}
+
+	@Test
+	void aMessageForgedWithoutTheControlPlaneIsDeadLetteredAndNeverAccepted() throws Exception {
+		// A genuine event, altered by someone with broker write access.
+		UUID scanId = UUID.fromString(json(requestScan(createProject(), randomSha(), null)).get("id").asString());
+		Map<String, Object> genuine = this.jdbcTemplate
+			.queryForMap("SELECT id, payload::text AS payload FROM outbox_events WHERE aggregate_id = ?", scanId);
+		String forgedBody = ((String) genuine.get("payload")).replace("\"branch\": \"main\"",
+				"\"branch\": \"attacker\"");
+		assertThat(forgedBody).isNotEqualTo(genuine.get("payload"));
+		this.rabbitTemplate.send(MessagingTopology.SCAN_REQUESTS_EXCHANGE, MessagingTopology.SCAN_REQUESTED_ROUTING_KEY,
+				scanRequestedMessage(genuine.get("id").toString(), forgedBody));
+
+		WorkerRun run = runWorker(1);
+
+		assertThat(run.exitCode()).as(run.output()).isZero();
+		assertThat(outcomes(run, this.jsonMapper)).containsEntry("dead_lettered", 1);
+		assertThat(receipts(genuine.get("id"))).isEmpty();
+		assertThat(run.output()).contains("DIGEST_MISMATCH");
+		assertThat(this.jdbcTemplate.queryForObject("SELECT reason FROM worker.delivery_rejections WHERE event_id = ?",
+				String.class, genuine.get("id")))
+			.isEqualTo("DIGEST_MISMATCH");
+	}
+
+	@Test
+	void anAuditedDeadLetterReplayThroughTheOperatorCliIsReprocessed() throws Exception {
+		UUID scanId = UUID.fromString(json(requestScan(createProject(), randomSha(), null)).get("id").asString());
+		Map<String, Object> event = this.jdbcTemplate
+			.queryForMap("SELECT id, payload::text AS payload FROM outbox_events WHERE aggregate_id = ?", scanId);
+		// As after a long database outage: the genuine message sits in the dead-letter queue.
+		this.rabbitTemplate.send(MessagingTopology.DEAD_LETTER_EXCHANGE, "",
+				scanRequestedMessage(event.get("id").toString(), (String) event.get("payload")));
+
+		WorkerRun replay = runOperator("dlq-replay", "--operator", "e2e-operator", "--reason", "E2E replay",
+				"--max-messages", "5");
+
+		assertThat(replay.exitCode()).as(replay.output()).isZero();
+		assertThat(this.jsonMapper.readTree(replay.output()).get("replayed").asInt()).isEqualTo(1);
+		assertThat(replay.output()).doesNotContain(OPERATOR_PASSWORD);
+		assertThat(this.jdbcTemplate.queryForObject(
+				"SELECT operator FROM ops.recovery_actions WHERE action = 'DEAD_LETTER_REPLAY' AND event_id = ?",
+				String.class, event.get("id")))
+			.isEqualTo("e2e-operator");
+		WorkerRun run = runWorker(1);
+		assertThat(outcomes(run, this.jsonMapper)).containsEntry("accepted", 1);
+		assertThat(receipts(event.get("id"))).hasSize(1);
+	}
+
+	private static Message scanRequestedMessage(String eventId, String body) {
+		return MessageBuilder.withBody(body.getBytes(StandardCharsets.UTF_8))
+			.setContentType("application/json")
+			.setMessageId(eventId)
+			.setType("scan.requested.v1")
+			.build();
 	}
 
 	@Test
