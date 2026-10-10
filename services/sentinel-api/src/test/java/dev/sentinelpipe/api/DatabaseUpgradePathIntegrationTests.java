@@ -3,6 +3,8 @@ package dev.sentinelpipe.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.output.MigrateResult;
@@ -121,6 +123,68 @@ class DatabaseUpgradePathIntegrationTests {
 		assertThat(jdbc.queryForMap("SELECT execution_status, failure_reason FROM scan_jobs WHERE id = ?", jobId))
 			.containsEntry("execution_status", "QUEUED")
 			.containsEntry("failure_reason", "LEASE_EXPIRED");
+	}
+
+	@Test
+	void upgradingFromV007KeepsLegacyReportsAndInFlightLeasesUsable() {
+		// A V007 installation with a scan whose two jobs are claimed; one already reported
+		// through V007's report_job (no result document), the other still running.
+		DatabaseRoles.provision(this.postgres);
+		flyway(DatabaseRoles.MIGRATOR_USER, DatabaseRoles.MIGRATOR_PASSWORD, "7", "SET ROLE sentinel_owner")
+			.migrate();
+		JdbcTemplate jdbc = this.admin.jdbc();
+		UUID organizationId = UUID.randomUUID();
+		UUID projectId = UUID.randomUUID();
+		UUID scanId = UUID.randomUUID();
+		jdbc.update("INSERT INTO organizations (id, name, slug, version, created_at, updated_at)"
+				+ " VALUES (?, 'V7', 'v7', 0, now(), now())", organizationId);
+		jdbc.update("INSERT INTO projects (id, organization_id, name, repository_provider, repository_owner,"
+				+ " repository_name, default_branch, enabled, version, created_at, updated_at)"
+				+ " VALUES (?, ?, 'P', 'GITHUB', 'acme', 'repo', 'main', true, 0, now(), now())", projectId,
+				organizationId);
+		jdbc.update("INSERT INTO scans (id, project_id, commit_sha, branch, trigger_type, execution_status,"
+				+ " security_decision, version, requested_at, updated_at)"
+				+ " VALUES (?, ?, repeat('a', 40), 'main', 'PUSH', 'QUEUED', 'PENDING', 0, now(), now())", scanId,
+				projectId);
+		for (String scanner : List.of("FIXTURE", "SEMGREP")) {
+			jdbc.update("INSERT INTO scan_jobs (id, scan_id, scanner_type, execution_status, attempt_count, version,"
+					+ " created_at, updated_at) VALUES (gen_random_uuid(), ?, ?, 'QUEUED', 0, 0, now(), now())", scanId,
+					scanner);
+		}
+		JdbcTemplate worker = this.admin.connectAs(DatabaseRoles.WORKER_USER, DatabaseRoles.WORKER_PASSWORD);
+		Map<String, Object> reported = worker.queryForMap(
+				"SELECT job_id, lease_epoch, lease_token FROM worker.claim_job(ARRAY['FIXTURE'], ?)", scanId);
+		Map<String, Object> running = worker.queryForMap(
+				"SELECT job_id, scan_id, project_id, organization_id, commit_sha, attempt, lease_epoch, lease_token"
+						+ " FROM worker.claim_job(ARRAY['SEMGREP'], ?)",
+				scanId);
+		assertThat(worker.queryForObject("SELECT worker.report_job(?, ?, ?, ?, 'COMPLETED')", String.class,
+				reported.get("job_id"), scanId, reported.get("lease_epoch"), reported.get("lease_token")))
+			.isEqualTo("ACCEPTED");
+
+		assertThat(migrator().migrate().migrationsExecuted).isEqualTo(1);
+
+		// The legacy report is kept as it was; report_job no longer exists.
+		assertThat(jdbc.queryForMap("SELECT outcome, result FROM lifecycle.job_reports WHERE job_id = ?",
+				reported.get("job_id")))
+			.containsEntry("outcome", "COMPLETED")
+			.containsEntry("result", null);
+		assertThat(jdbc.queryForObject("SELECT to_regprocedure('worker.report_job(uuid,uuid,bigint,text,text,text)')",
+				String.class))
+			.isNull();
+		// The in-flight lease completes through the V008 contract.
+		String result = "{\"artifacts\":[],\"attempt\":%s,\"commit_sha\":\"%s\",\"failure_reason\":null,"
+				.formatted(running.get("attempt"), running.get("commit_sha"))
+				+ "\"finished_at\":\"2026-10-10T12:00:01Z\",\"job_id\":\"%s\",\"lease_epoch\":%s,"
+					.formatted(running.get("job_id"), running.get("lease_epoch"))
+				+ "\"organization_id\":\"%s\",\"outcome\":\"COMPLETED\",\"project_id\":\"%s\",\"scan_id\":\"%s\","
+					.formatted(running.get("organization_id"), running.get("project_id"), running.get("scan_id"))
+				+ "\"scanner_type\":\"SEMGREP\",\"schema_version\":1,\"started_at\":\"2026-10-10T12:00:00Z\"}";
+		assertThat(worker.queryForObject("SELECT worker.submit_result(?, ?)", String.class,
+				running.get("lease_token"), result))
+			.isEqualTo("ACCEPTED");
+		assertThat(jdbc.queryForObject("SELECT execution_status FROM scans WHERE id = ?", String.class, scanId))
+			.isEqualTo("EVALUATING");
 	}
 
 	@Test

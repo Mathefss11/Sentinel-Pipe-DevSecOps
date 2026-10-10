@@ -221,6 +221,62 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 	}
 
 	// ---------------------------------------------------------------------------------
+	// Escalation paths (M3 Phase 1 security review)
+	// ---------------------------------------------------------------------------------
+
+	@Test
+	void runtimeLoginsBelongOnlyToTheirOwnGroupAndGroupsToNothing() {
+		Map<String, String> expected = Map.of(DatabaseRoles.API_USER, "sentinel_api", DatabaseRoles.WORKER_USER,
+				"sentinel_worker", DatabaseRoles.OPERATOR_USER, "sentinel_operator");
+		for (Map.Entry<String, String> login : expected.entrySet()) {
+			assertThat(this.admin.jdbc().queryForList("""
+					SELECT g.rolname FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid
+					WHERE m.member = ?::regrole""", String.class, login.getKey()))
+				.as(login.getKey())
+				.containsExactly(login.getValue());
+		}
+		// No SentinelPipe group is itself a member of any role (no transitive inheritance),
+		// and no SentinelPipe role reaches a predefined privileged role.
+		assertThat(this.admin.jdbc().queryForObject("""
+				SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member
+				WHERE r.rolname IN ('sentinel_owner', 'sentinel_api', 'sentinel_worker', 'sentinel_operator')""",
+				Long.class))
+			.isZero();
+		for (String predefined : List.of("pg_read_all_data", "pg_write_all_data", "pg_read_server_files",
+				"pg_write_server_files", "pg_execute_server_program", "pg_signal_backend", "pg_monitor")) {
+			assertThat(this.admin.jdbc().queryForObject("""
+					SELECT count(*) FROM pg_roles r
+					WHERE r.rolname LIKE 'sentinel\\_%' AND pg_has_role(r.oid, ?, 'USAGE')""", Long.class,
+					predefined))
+				.as(predefined)
+				.isZero();
+		}
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = { "CREATE TEMP TABLE probe (id int)", "SELECT pg_read_file('/etc/passwd')",
+			"SELECT lo_import('/etc/passwd')", "COPY (SELECT 1) TO PROGRAM 'id'", "CREATE EXTENSION dblink",
+			"CREATE FUNCTION public.probe() RETURNS int AS 'SELECT 1' LANGUAGE sql" })
+	void noRuntimeLoginReachesServerFilesProgramsExtensionsOrTemporaryObjects(String sql) {
+		assertDenied(api(), sql);
+		assertDenied(worker(), sql);
+		assertDenied(operator(), sql);
+	}
+
+	@Test
+	void securityDefinerFunctionsExistOnlyInControlledSchemasWithAPinnedSearchPath() {
+		assertThat(this.admin.jdbc().queryForList("""
+				SELECT p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+				WHERE p.prosecdef AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+				  AND (n.nspname NOT IN ('worker', 'ops', 'lifecycle', 'evidence')
+				       OR p.proconfig IS NULL
+				       OR NOT 'search_path=pg_catalog, pg_temp' = ANY (p.proconfig))""", String.class))
+			.isEmpty();
+		assertThat(this.admin.jdbc().queryForList("SELECT extname FROM pg_extension", String.class))
+			.containsExactly("plpgsql");
+	}
+
+	// ---------------------------------------------------------------------------------
 	// API runtime identity
 	// ---------------------------------------------------------------------------------
 

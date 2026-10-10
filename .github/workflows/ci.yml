@@ -58,20 +58,23 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Must match TestcontainersConfiguration.java and the Ryuk image used by Testcontainers.
+      # Must match TestcontainersConfiguration.java. Every CI image is pinned by digest.
       - name: Pre-pull Testcontainers images
         run: >-
           sh "$GITHUB_WORKSPACE/scripts/ci/pull-images.sh"
           postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
           rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
-          testcontainers/ryuk:0.14.0
 
       - name: Log out of Docker Hub
         if: always()
         run: docker logout
 
-      # Integration tests use Testcontainers against the runner's Docker Engine.
+      # Integration tests use Testcontainers against the runner's Docker Engine. The runner is
+      # ephemeral, so Testcontainers' resource reaper (Ryuk, an image pinned only by tag) is
+      # disabled and never pulled.
       - name: Build and test
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
         run: sh ./mvnw --batch-mode --no-transfer-progress clean verify
 
   worker:
@@ -263,14 +266,13 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Must match TestcontainersConfiguration.java and the Ryuk image used by Testcontainers;
-      # the alpine image is the worker's sandbox image (sentinel_worker/sandbox/policy.py).
+      # Must match TestcontainersConfiguration.java; the alpine image is the worker's sandbox
+      # image (sentinel_worker/sandbox/policy.py). Every CI image is pinned by digest.
       - name: Pre-pull Testcontainers and sandbox images
         run: >-
           sh scripts/ci/pull-images.sh
           postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
           rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
-          testcontainers/ryuk:0.14.0
           alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
 
       - name: Log out of Docker Hub
@@ -284,6 +286,8 @@ jobs:
       # The e2e profile sets failIfNoTests, so this step fails if no E2E test runs.
       - name: Run end-to-end tests
         working-directory: services/sentinel-api
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
         run: sh ./mvnw --batch-mode --no-transfer-progress verify -Pe2e "-Dsentinel.e2e.python=$(command -v python)"
 
   infrastructure:

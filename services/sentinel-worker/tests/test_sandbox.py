@@ -556,3 +556,57 @@ def test_the_reaper_never_removes_a_live_sandbox_or_foreign_containers() -> None
     assert sandbox.reap_expired() == 2
 
     assert cli.removed == [expired, unlabelled_done]
+
+
+# --- Security review (Slice 5): mounts and runtime CLI failures ----------------------
+
+
+def test_only_runtime_created_mounts_are_accepted() -> None:
+    from sentinel_worker.sandbox.isolation import unexpected_mounts
+
+    # Mount targets inside the container (not host temporary files).
+    runtime = ["/", "/proc", "/dev", "/dev/pts", "/sys", "/sys/fs/cgroup", "/dev/mqueue",
+               "/sbin/docker-init", "/tmp", "/etc/resolv.conf", "/etc/hostname", "/etc/hosts",  # noqa: S108
+               "/proc/kcore", "/sys/firmware"]  # fmt: skip
+    assert unexpected_mounts(runtime) == []
+    hostile = [
+        "/var/run/docker.sock",
+        "/host",
+        "/home/runner/work",
+        "/procfs",
+        "/devices",
+        "/etc/passwd",
+    ]
+    assert unexpected_mounts(runtime + hostile) == hostile
+
+
+class LyingCli(DockerCli):
+    """A runtime CLI that exits 0 and prints a perfect envelope, but no container exists."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def start(self, arguments: Any) -> Any:
+        import subprocess
+
+        envelope_text = envelope(artifact()).decode()
+        return subprocess.Popen(  # noqa: S603 - test double
+            [sys.executable, "-c", f"import sys; sys.stdout.write({envelope_text!r})"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def call(self, arguments: Any, timeout: float = 30) -> Any:
+        import subprocess
+
+        self.calls.append(list(arguments))
+        return subprocess.CompletedProcess(arguments, 1, b"", b"Error: No such object")
+
+
+def test_runtime_cli_output_without_a_real_container_is_never_success() -> None:
+    sandbox = DockerSandbox(LyingCli(), SandboxPolicy(), monitor_interval=60)
+
+    run_result = sandbox.run(ARGV, threading.Event())
+
+    assert run_result.status is SandboxStatus.START_FAILED
+    assert outcome_for(run_result).failure_reason is FailureReason.SANDBOX_ERROR

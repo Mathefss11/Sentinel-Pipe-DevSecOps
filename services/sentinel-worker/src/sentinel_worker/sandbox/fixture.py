@@ -84,7 +84,8 @@ env_names=$(env | cut -d= -f1 | sort | tr '\n' ' ')
 internet=false; wget -q -T 2 -O /dev/null http://1.1.1.1/ 2>/dev/null && internet=true
 pids_max=$(cat /sys/fs/cgroup/pids.max 2>/dev/null || echo unknown)
 memory_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unknown)
-emit "$(printf '{"capabilities_effective":"%s","docker_socket":%s,"environment":"%s","internet_reachable":%s,"memory_max":"%s","no_new_privs":"%s","pids_max":"%s","root_writable":%s,"seccomp":"%s","sentinel_variables":%s,"tmp_executable":%s,"tmp_writable":%s,"uid":%s}' "$capeff" "$docker_socket" "$env_names" "$internet" "$memory_max" "$no_new_privs" "$pids_max" "$root_writable" "$seccomp" "$sentinel_env" "$tmp_executable" "$tmp_writable" "$uid")"
+mounts=$(cut -d' ' -f2 /proc/self/mounts | tr '\n' ' ')
+emit "$(printf '{"capabilities_effective":"%s","docker_socket":%s,"environment":"%s","internet_reachable":%s,"memory_max":"%s","mounts":"%s","no_new_privs":"%s","pids_max":"%s","root_writable":%s,"seccomp":"%s","sentinel_variables":%s,"tmp_executable":%s,"tmp_writable":%s,"uid":%s}' "$capeff" "$docker_socket" "$env_names" "$internet" "$memory_max" "$mounts" "$no_new_privs" "$pids_max" "$root_writable" "$seccomp" "$sentinel_env" "$tmp_executable" "$tmp_writable" "$uid")"
 """,
     FixtureMode.OVERSIZED_OUTPUT: r"""
 head -c 4000000 /dev/zero | tr '\0' 'A'

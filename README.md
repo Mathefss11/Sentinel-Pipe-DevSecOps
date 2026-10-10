@@ -633,7 +633,10 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   read-only root, non-root, no capabilities, PID, memory, CPU and time limits), cancellation
   and lease loss kill the sandbox, crash reaping, data-only output channel, deterministic
   fixture modes, `sandbox-check`, CI sandbox job (ADR-0009, threat model)
-- [ ] Slice 5 — threat model, adversarial tests and CI sandbox job
+- [x] Slice 5 — security review, adversarial and escalation tests, cross-table invariants,
+  upgrade runbook, consolidated threat assessment and
+  [security-readiness report](docs/security/m3-phase1-security-readiness.md) (verdict: ready
+  with conditions)
 
 ## Architecture decisions
 

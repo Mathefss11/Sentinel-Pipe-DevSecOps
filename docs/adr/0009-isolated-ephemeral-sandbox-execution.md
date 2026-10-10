@@ -114,10 +114,12 @@ exercise the same isolation, limits and lifecycle that real scanners will use.
    default and refused in production on both the API and the worker.
 
 7. **Verification on the real host.** `sentinel-worker sandbox-check` runs the isolation
-   probe in a real sandbox and verifies 12 controls from the inside:
+   probe in a real sandbox and verifies 13 controls from the inside:
    - non-root user, no capabilities, no-new-privileges, a seccomp filter;
    - read-only root, noexec `/tmp`;
    - no Docker socket, no network, no host environment;
+   - no host mounts: every mount target in `/proc/self/mounts` must be one the runtime itself
+     creates (added in the M3 Phase 1 security review);
    - the PID and memory limits;
    - removal of the container.
 

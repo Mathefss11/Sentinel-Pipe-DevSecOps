@@ -314,3 +314,22 @@ def test_one_worker_never_reaps_another_workers_live_sandbox(
         stop.set()
         running.join(timeout=30)
     assert containers(docker_cli, f"{JOB_LABEL}={claimed.job_id}") == []
+
+
+def test_the_mount_check_detects_a_real_host_mount(docker_cli: DockerCli, tmp_path: object) -> None:
+    """Negative control: a container started outside the policy, with a bind mount, must
+    fail the no_host_mounts control (proves the check observes real mounts)."""
+    from sentinel_worker.sandbox.isolation import observations, unexpected_mounts
+    from sentinel_worker.sandbox.policy import FIXTURE_IMAGE
+
+    argv = probe_command()
+    result = docker_cli.call(
+        ["run", "--rm", "--network", "none", "--pull", "never", "-v", f"{tmp_path}:/hostdir:ro",
+         "--entrypoint", argv[0], FIXTURE_IMAGE, *argv[1:]],
+        timeout=60,
+    )  # fmt: skip
+    assert result.returncode == 0
+    from sentinel_worker.sandbox.docker import SandboxRun
+
+    seen = observations(SandboxRun(SandboxStatus.EXITED, 0, result.stdout, "", 0, None, None, True))
+    assert unexpected_mounts(str(seen["mounts"]).split()) == ["/hostdir"]

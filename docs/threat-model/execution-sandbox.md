@@ -1,5 +1,7 @@
 # Threat model: scan execution plane
 
+Consolidated, system-wide assessment: [M3 Phase 1 threat assessment](../security/m3-phase1-threat-assessment.md).
+
 Scope: worker processes, sandbox containers and their interfaces to PostgreSQL. This
 covers Flyway V007/V008, ADR-0007, ADR-0008 and ADR-0009. Method: STRIDE per trust
 boundary. Status: M3 Phase 1, Slice 4. Only the harmless FIXTURE executes; no repository

@@ -183,3 +183,28 @@ def test_a_cancelled_job_is_stopped_at_the_next_heartbeat(control_plane: Control
     assert time.monotonic() - started < 10
     assert control_plane.job_state(job.job_id)["status"] == "CANCELLED"
     assert control_plane.scan_status(job.scan_id) == "CANCELLED"
+
+
+def test_heartbeats_survive_repeated_database_disconnections(control_plane: ControlPlane) -> None:
+    # Shortest lease (15 s): heartbeats every 3.75 s while the fixture runs for 9 s.
+    job = control_plane.seed_fixture_job(lease_seconds=15)
+    outcomes: list[RunOutcome] = []
+    with client(control_plane) as worker, client(control_plane, "heartbeat") as heartbeats:
+        lease = worker.claim(["FIXTURE"], job.scan_id)
+        assert lease is not None
+        loop = ExecutionLoop(worker, heartbeats, FixtureExecutor(9.0), report_backoff=0.1)
+        runner = threading.Thread(target=lambda: outcomes.append(loop.run_one(lease)))
+        runner.start()
+        for _ in range(2):
+            time.sleep(3)
+            # Failure injection: PostgreSQL drops every worker connection.
+            control_plane.terminate_worker_connections()
+        runner.join(timeout=30)
+
+    assert outcomes == [RunOutcome.REPORTED]
+    assert control_plane.job_state(job.job_id)["status"] == "COMPLETED"
+    with control_plane.admin() as connection:
+        renewals = connection.execute(
+            "SELECT heartbeat_at > started_at FROM scan_jobs WHERE id = %s", (job.job_id,)
+        ).fetchone()[0]
+    assert renewals is True

@@ -7,6 +7,12 @@
 *.p12
 *.jks
 
+# Local AI assistant instructions: owner-only, never committed. Patterns without a slash
+# match at every directory level; both spellings are listed because case sensitivity
+# depends on core.ignorecase.
+CLAUDE.md
+claude.md
+
 # Java / Maven (module-specific rules live in services/sentinel-api/.gitignore)
 target/
 

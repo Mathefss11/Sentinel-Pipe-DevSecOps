@@ -39,6 +39,11 @@ public final class TestDatabaseAdmin {
 		return new JdbcTemplate(new SimpleDriverDataSource(new Driver(), this.postgres.getJdbcUrl(), user, password));
 	}
 
+	/** A raw connection as {@code user}, for tests that control transactions themselves. */
+	public java.sql.Connection openConnection(String user, String password) throws SQLException {
+		return DriverManager.getConnection(this.postgres.getJdbcUrl(), user, password);
+	}
+
 	/** Verifies that {@code user} can open a connection at all. */
 	public boolean canConnect(String user, String password) {
 		try (var connection = DriverManager.getConnection(this.postgres.getJdbcUrl(), user, password)) {

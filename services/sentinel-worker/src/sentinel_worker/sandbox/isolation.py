@@ -19,6 +19,23 @@ from sentinel_worker.sandbox.protocol import InvalidOutputError, parse
 #: Variables the container runtime itself sets; nothing else may reach the sandbox.
 RUNTIME_VARIABLES = frozenset({"HOME", "HOSTNAME", "PATH", "PWD", "SHLVL"})
 
+#: Mount points the runtime itself creates: the read-only root, the bounded tmpfs, the
+#: read-only resolver and host files it generates, its init binary, and kernel
+#: filesystems. Any other mount target (a host directory, a socket) fails the check.
+RUNTIME_MOUNTS = frozenset(
+    {"/", "/tmp", "/etc/resolv.conf", "/etc/hostname", "/etc/hosts", "/sbin/docker-init"}  # noqa: S108 - container paths
+)
+KERNEL_FILESYSTEMS = ("/proc", "/dev", "/sys")
+
+
+def unexpected_mounts(targets: list[str]) -> list[str]:
+    return [
+        target
+        for target in targets
+        if target not in RUNTIME_MOUNTS
+        and not any(target == root or target.startswith(root + "/") for root in KERNEL_FILESYSTEMS)
+    ]
+
 
 def probe_command() -> list[str]:
     return script_command(
@@ -50,6 +67,8 @@ def verify(run: SandboxRun, policy: SandboxPolicy) -> dict[str, Any]:
         "noexec_temporary_storage": seen.get("tmp_writable") is True
         and seen.get("tmp_executable") is False,
         "no_docker_socket": seen.get("docker_socket") is False,
+        "no_host_mounts": bool(str(seen.get("mounts", "")).split())
+        and not unexpected_mounts(str(seen.get("mounts", "")).split()),
         "no_network": seen.get("internet_reachable") is False,
         "no_host_environment": seen.get("sentinel_variables") == 0
         and environment <= RUNTIME_VARIABLES,
