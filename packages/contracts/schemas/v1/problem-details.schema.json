@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sentinelpipe.dev/schemas/v1/problem-details.schema.json",
   "title": "ProblemDetails",
-  "description": "RFC 9457 Problem Details (media type application/problem+json). Never contains stack traces, exception names, SQL or echoed input values. SentinelPipe problem types are URNs of the form urn:sentinelpipe:problem:<name>; framework errors may use about:blank.",
+  "description": "RFC 9457 Problem Details (media type application/problem+json). Never contains stack traces, exception names, SQL or echoed input values. SentinelPipe problem types are URNs of the form urn:sentinelpipe:problem:<name>; framework errors may use about:blank. Authentication failures (401) never state why a token was rejected.",
   "type": "object",
   "required": ["type", "title", "status"],
   "properties": {
@@ -12,9 +12,19 @@
     "detail": { "type": "string" },
     "instance": { "type": "string", "format": "uri-reference" },
     "code": {
-      "description": "Stable machine-readable conflict code (409 responses).",
+      "description": "Stable machine-readable reason (409 conflicts and 403 authorization failures).",
       "type": "string",
-      "enum": ["organization-slug-taken", "repository-already-registered", "project-disabled"]
+      "enum": [
+        "organization-slug-taken",
+        "repository-already-registered",
+        "project-disabled",
+        "membership-already-exists",
+        "last-owner",
+        "insufficient-role",
+        "role-escalation",
+        "self-modification",
+        "platform-admin-required"
+      ]
     },
     "errors": {
       "description": "Field-level validation errors (400 validation-error responses).",

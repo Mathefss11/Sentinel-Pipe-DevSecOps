@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/create-membership-request.schema.json",
+  "title": "CreateMembershipRequest",
+  "description": "Grants a role to the user with this token subject. The issuer is always the caller's issuer; organization and grantor are taken from the request path and the authenticated caller. Unknown properties (for example issuer, organizationId or grantedBy) are rejected. OWNERs may grant any role; ADMINs may grant only MEMBER or VIEWER; nobody can grant to themselves.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subject", "role"],
+  "properties": {
+    "subject": { "$ref": "common.schema.json#/$defs/subject" },
+    "role": { "$ref": "common.schema.json#/$defs/organizationRole" }
+  }
+}

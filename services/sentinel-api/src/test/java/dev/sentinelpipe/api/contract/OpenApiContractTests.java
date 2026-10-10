@@ -74,6 +74,29 @@ class OpenApiContractTests extends AbstractDomainApiIntegrationTest {
 	}
 
 	@Test
+	void everyOperationRequiresBearerAuthenticationAndDocuments401() {
+		JsonNode scheme = this.openApi.path("components").path("securitySchemes").path("bearerAuth");
+		assertThat(scheme.path("type").asString()).isEqualTo("http");
+		assertThat(scheme.path("scheme").asString()).isEqualTo("bearer");
+		assertThat(this.openApi.path("security").get(0).has("bearerAuth")).isTrue();
+
+		for (Map.Entry<String, JsonNode> path : this.openApi.get("paths").properties()) {
+			for (Map.Entry<String, JsonNode> operation : path.getValue().properties()) {
+				if (!HTTP_METHODS.contains(operation.getKey())) {
+					continue;
+				}
+				String name = operation.getKey() + " " + path.getKey();
+				assertThat(operation.getValue().has("security")).as("%s must not override global security", name)
+					.isFalse();
+				assertThat(operation.getValue().path("responses").has("401")).as("%s documents 401", name).isTrue();
+				if (!path.getKey().equals("/api/v1/me")) {
+					assertThat(operation.getValue().path("responses").has("403")).as("%s documents 403", name).isTrue();
+				}
+			}
+		}
+	}
+
+	@Test
 	void everyReferencedSchemaFileExists() {
 		List<String> refs = new ArrayList<>();
 		collectSchemaRefs(this.openApi, refs);
@@ -95,7 +118,7 @@ class OpenApiContractTests extends AbstractDomainApiIntegrationTest {
 			}
 		}
 
-		assertThat(validated).as("number of validated OpenAPI examples").isGreaterThanOrEqualTo(10);
+		assertThat(validated).as("number of validated OpenAPI examples").isGreaterThanOrEqualTo(16);
 	}
 
 	private static Path schemaFile(String ref) {

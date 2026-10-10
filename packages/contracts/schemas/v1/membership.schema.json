@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/membership.schema.json",
+  "title": "Membership",
+  "description": "A user's role in one organization. The user is identified by the OIDC issuer and subject of their access tokens.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "organizationId", "issuer", "subject", "role", "createdAt", "updatedAt"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "organizationId": { "$ref": "common.schema.json#/$defs/uuid" },
+    "issuer": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "subject": { "$ref": "common.schema.json#/$defs/subject" },
+    "role": { "$ref": "common.schema.json#/$defs/organizationRole" },
+    "createdAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "updatedAt": { "$ref": "common.schema.json#/$defs/timestamp" }
+  }
+}

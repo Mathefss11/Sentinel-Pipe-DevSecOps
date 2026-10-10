@@ -1,5 +1,8 @@
 package dev.sentinelpipe.api.organization;
 
+import dev.sentinelpipe.api.authorization.AccessControl;
+import dev.sentinelpipe.api.authorization.OrganizationPermission;
+import dev.sentinelpipe.api.identity.AuthenticatedPrincipal;
 import dev.sentinelpipe.api.security.ConditionalOnDomainApiEnabled;
 import jakarta.validation.Valid;
 import java.net.URI;
@@ -20,19 +23,29 @@ class OrganizationController {
 
 	private final OrganizationService organizationService;
 
-	OrganizationController(OrganizationService organizationService) {
+	private final OrganizationProvisioningService provisioningService;
+
+	private final AccessControl accessControl;
+
+	OrganizationController(OrganizationService organizationService,
+			OrganizationProvisioningService provisioningService, AccessControl accessControl) {
 		this.organizationService = organizationService;
+		this.provisioningService = provisioningService;
+		this.accessControl = accessControl;
 	}
 
+	/** Platform administrators only; the creator becomes the organization's first OWNER. */
 	@PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
 	ResponseEntity<OrganizationResponse> create(@Valid @RequestBody CreateOrganizationRequest request) {
-		Organization organization = this.organizationService.create(request.name(), request.slug());
+		AuthenticatedPrincipal creator = this.accessControl.requirePlatformAdmin();
+		Organization organization = this.provisioningService.create(request.name(), request.slug(), creator);
 		return ResponseEntity.created(URI.create("/api/v1/organizations/" + organization.getId()))
 			.body(OrganizationResponse.from(organization));
 	}
 
 	@GetMapping("/{organizationId}")
 	OrganizationResponse get(@PathVariable("organizationId") UUID organizationId) {
+		this.accessControl.requireOnOrganization(organizationId, OrganizationPermission.VIEW_ORGANIZATION);
 		return OrganizationResponse.from(this.organizationService.get(organizationId));
 	}
 

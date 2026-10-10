@@ -2,7 +2,7 @@
 
 ## Project status
 
-SentinelPipe is pre-release software under active development (Milestone 2, Phase 1: domain model and REST contracts).
+SentinelPipe is pre-release software under active development (Milestone 2, Phase 2A: identity and tenant authorization).
 It is not yet intended for production use, and no version is currently supported for
 production deployments. Security fixes are applied to the `main` branch.
 
@@ -54,11 +54,24 @@ The current version implements the following controls:
   policy. It permits health checks and decision queries and rejects policy and data
   management requests. The container runs as a non-root user with a read-only root
   filesystem, all Linux capabilities dropped, and `no-new-privileges`.
-- **API surface:** by default, only the Actuator health endpoints are exposed, without
-  component details. The unauthenticated domain API (`/api/v1`) is registered only when
-  `sentinel.domain-api.enabled=true`. Startup then fails unless `server.address` is a
-  literal loopback IP and no `prod`/`production` profile is active (ADR-0002). There is no
-  public endpoint that changes scan or job state.
+- **API surface:** by default, only the Actuator health endpoints are reachable, without
+  component details; every other request is denied. The domain API (`/api/v1`) is
+  registered only when `sentinel.domain-api.enabled=true`. Startup then fails unless the
+  identity settings are complete, `server.address` is a literal loopback IP and no
+  `prod`/`production` profile is active (ADR-0002, ADR-0003). There is no public endpoint
+  that changes scan or job state.
+- **Authentication:** OAuth 2.0 Resource Server. Access tokens from an external OIDC
+  provider must be JWS-signed with an allow-listed asymmetric algorithm, carry an
+  allow-listed `typ` (`at+jwt` by default), the exact configured issuer, the configured
+  audience and an unexpired `exp`. Unsigned and HMAC tokens cannot be accepted, there is
+  no shared signing secret, tokens are accepted only in the `Authorization` header, and
+  401 responses do not disclose the rejection reason. SentinelPipe stores no passwords.
+- **Authorization:** every tenant-scoped request is checked against server-side
+  organization memberships (OWNER, ADMIN, MEMBER, VIEWER); token role or organization
+  claims are ignored. Non-members receive 404 for foreign resources (no IDOR or existence
+  disclosure). Role escalation and self-modification are rejected, membership changes are
+  serialized per organization, and an organization always keeps an OWNER. Organization
+  creation is limited to configured platform administrators.
 - **Input handling:** request bodies reject unknown properties. Repository identity is
   accepted only as validated owner and name, never as a URL. Commit SHAs must be full
   object names, and branch names are restricted to a conservative character set. Errors are
@@ -75,10 +88,11 @@ The current version implements the following controls:
 
 ## Known limitations
 
-- The API has no authentication or authorization yet. Any caller that can reach the domain
-  API can access every organization's data. Loopback binding is a development safeguard,
-  not access control. Tenant-scoped authorization is planned for the next M2 phase. Do not
-  expose the API to untrusted networks, and do not use the `local` profile on shared hosts.
+- The domain API is authenticated and tenant-authorized, but it is not yet approved for
+  external exposure: audit logging of security events, rate limiting and a hardened
+  deployment are still missing. It remains disabled by default and loopback-only.
+- Access tokens stay valid until they expire (no revocation or introspection). Membership
+  revocation takes effect on the next request. Only one trusted issuer is supported.
 - Scan `triggerType` and `branch` are caller-supplied and not yet verified against GitHub
   events or OIDC claims. Idempotency keys do not expire, and there is no rate limiting.
 - The Compose stack is for local development only. It does not use TLS between services, and

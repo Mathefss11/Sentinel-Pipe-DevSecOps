@@ -47,12 +47,26 @@ server:
 
 sentinel:
   domain-api:
-    # The domain REST API (/api/v1) has NO authentication or tenant authorization yet.
-    # It is disabled by default: its controllers are not registered and its routes do
-    # not exist. Enabling it requires a literal loopback server.address and is refused
-    # with a prod/production profile (see DomainApiExposureGuard and ADR-0002). Use the
-    # `local` profile for development.
+    # The domain REST API (/api/v1) is disabled by default: its controllers are not
+    # registered and every non-health request is denied. Enabling it requires valid JWT
+    # settings (below), a literal loopback server.address, and no prod/production
+    # profile (see DomainApiExposureGuard, ADR-0002 and ADR-0003). Use the `local`
+    # profile for development.
     enabled: false
+  # Identity (M2 Phase 2A). Required whenever the domain API is enabled; startup fails
+  # if incomplete. Supply via environment variables, e.g.:
+  #   SENTINEL_SECURITY_JWT_ISSUER            exact `iss` of the OIDC provider
+  #   SENTINEL_SECURITY_JWT_AUDIENCE          value required in `aud`
+  #   SENTINEL_SECURITY_JWT_JWK_SET_URI       provider JWKS endpoint (https)
+  #   SENTINEL_SECURITY_PLATFORM_ADMIN_SUBJECTS  comma-separated `sub` values allowed
+  #                                           to create organizations (bootstrap)
+  # No shared secrets are supported: tokens must be signed with the provider's
+  # asymmetric keys. See ADR-0003.
+  security:
+    jwt:
+      jws-algorithms: RS256
+      token-types: at+jwt
+      clock-skew: 30s
 
 management:
   endpoints:

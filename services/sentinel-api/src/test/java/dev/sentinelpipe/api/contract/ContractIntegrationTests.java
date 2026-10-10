@@ -9,6 +9,7 @@ import com.networknt.schema.SchemaLocation;
 import com.networknt.schema.SchemaRegistry;
 import com.networknt.schema.SpecificationVersion;
 import dev.sentinelpipe.api.AbstractDomainApiIntegrationTest;
+import dev.sentinelpipe.api.TestJwts;
 import dev.sentinelpipe.api.scan.ScanLifecycleService;
 import dev.sentinelpipe.api.scan.SecurityDecision;
 import dev.sentinelpipe.api.scanjob.ScanJob;
@@ -20,6 +21,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MvcResult;
 import tools.jackson.databind.JsonNode;
@@ -45,7 +47,8 @@ class ContractIntegrationTests extends AbstractDomainApiIntegrationTest {
 		List<String> files = ContractSchemas.schemaFileNames();
 
 		assertThat(files).contains("organization.schema.json", "project.schema.json", "scan-request.schema.json",
-				"scan.schema.json", "scan-job.schema.json", "problem-details.schema.json");
+				"scan.schema.json", "scan-job.schema.json", "problem-details.schema.json", "membership.schema.json",
+				"current-user.schema.json");
 		for (String file : files) {
 			JsonNode schema = this.jsonMapper.readTree(Files.readString(ContractSchemas.SCHEMAS_DIR.resolve(file)));
 			assertThat(metaSchema.validate(schema)).as(file).isEmpty();
@@ -84,6 +87,29 @@ class ContractIntegrationTests extends AbstractDomainApiIntegrationTest {
 		assertValid("organization.schema.json", getJson("/api/v1/organizations/{id}", organizationId));
 		assertValid("project.schema.json", getJson("/api/v1/projects/{id}", projectId));
 		assertValid("project-page.schema.json", getJson("/api/v1/organizations/{id}/projects", organizationId));
+	}
+
+	@Test
+	void identityAndMembershipResponsesMatchTheirSchemas() throws Exception {
+		UUID organizationId = createOrganization();
+		MvcResult granted = this.mockMvc
+			.perform(post("/api/v1/organizations/{id}/members", organizationId).contentType(MediaType.APPLICATION_JSON)
+				.content("{\"subject\": \"%s\", \"role\": \"ADMIN\"}".formatted(uniqueSubject("schema"))))
+			.andReturn();
+		JsonNode membership = json(granted);
+
+		assertThat(granted.getResponse().getStatus()).isEqualTo(201);
+		assertValid("membership.schema.json", membership);
+		assertValid("membership.schema.json", getJson("/api/v1/organizations/{o}/members/{m}", organizationId,
+				membership.get("id").asString()));
+		assertValid("membership-page.schema.json", getJson("/api/v1/organizations/{id}/members", organizationId));
+		assertValid("current-user.schema.json", getJson("/api/v1/me"));
+		assertValid("create-membership-request.schema.json",
+				this.jsonMapper.readTree("{\"subject\": \"user-1\", \"role\": \"VIEWER\"}"));
+		assertThat(ContractSchemas.validate("create-membership-request.schema.json",
+				this.jsonMapper.readTree("{\"subject\": \"u\", \"role\": \"VIEWER\", \"issuer\": \"https://x\"}")))
+			.as("issuer cannot be supplied")
+			.isNotEmpty();
 	}
 
 	@Test
@@ -163,9 +189,25 @@ class ContractIntegrationTests extends AbstractDomainApiIntegrationTest {
 		problems.add(this.mockMvc
 			.perform(post("/api/v1/organizations").contentType(MediaType.TEXT_PLAIN).content("x"))
 			.andReturn());
+		problems.add(this.anonymousMvc.perform(get("/api/v1/me")).andReturn());
+		problems.add(this.anonymousMvc
+			.perform(get("/api/v1/me").header(HttpHeaders.AUTHORIZATION, "Bearer " + TestJwts.unsigned("x")))
+			.andReturn());
+		UUID organizationId = createOrganization();
+		String viewer = uniqueSubject("viewer");
+		grant(organizationId, viewer, "VIEWER");
+		problems.add(this.mockMvc
+			.perform(get("/api/v1/organizations/{id}/members", organizationId).header(HttpHeaders.AUTHORIZATION,
+					TestJwts.bearer(viewer)))
+			.andReturn());
+		problems.add(this.mockMvc
+			.perform(post("/api/v1/organizations").header(HttpHeaders.AUTHORIZATION, TestJwts.bearer(viewer))
+				.contentType(MediaType.APPLICATION_JSON)
+				.content("{\"name\": \"A\", \"slug\": \"%s\"}".formatted(uniqueSlug("nope"))))
+			.andReturn());
 
 		assertThat(problems).extracting((result) -> result.getResponse().getStatus())
-			.containsExactly(400, 400, 404, 400, 400, 409, 422, 415);
+			.containsExactly(400, 400, 404, 400, 400, 409, 422, 415, 401, 401, 403, 403);
 		for (MvcResult result : problems) {
 			assertThat(result.getResponse().getContentType()).startsWith(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
 			JsonNode body = json(result);

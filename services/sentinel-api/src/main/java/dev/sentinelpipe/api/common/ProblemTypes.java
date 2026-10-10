@@ -14,6 +14,10 @@ public final class ProblemTypes {
 
 	public static final URI MALFORMED_REQUEST = URI.create(PREFIX + "malformed-request");
 
+	public static final URI UNAUTHORIZED = URI.create(PREFIX + "unauthorized");
+
+	public static final URI FORBIDDEN = URI.create(PREFIX + "forbidden");
+
 	public static final URI NOT_FOUND = URI.create(PREFIX + "not-found");
 
 	public static final URI CONFLICT = URI.create(PREFIX + "conflict");

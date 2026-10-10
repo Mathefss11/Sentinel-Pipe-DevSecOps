@@ -2,31 +2,56 @@ openapi: 3.1.0
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 info:
   title: SentinelPipe Control Plane API
-  version: 1.0.0-m2.1
-  summary: Organizations, projects and security scan requests.
+  version: 1.1.0-m2.2a
+  summary: Organizations, memberships, projects and security scan requests.
   description: |
-    Domain REST API of the SentinelPipe control plane (Milestone 2, Phase 1).
+    Domain REST API of the SentinelPipe control plane (Milestone 2, Phase 2A).
 
-    **Security status: development only.** This API has no authentication and no
-    tenant authorization yet. It is disabled by default and can only be enabled
-    together with a literal loopback `server.address` (see ADR-0002). Knowing a
-    resource UUID is not authorization; production-grade identity and
-    organization-scoped authorization are required before any external
-    deployment.
+    **Authentication.** Every operation requires an OAuth 2.0 bearer access token
+    (JWT) issued by the configured external OIDC provider. Tokens must be signed
+    with an asymmetric algorithm, have the configured issuer and audience, an
+    `exp` claim, and the `typ` header `at+jwt` (configurable). Invalid or missing
+    tokens yield `401` without stating the reason.
+
+    **Authorization.** Access is decided by server-side organization memberships
+    (OWNER, ADMIN, MEMBER, VIEWER) for the token's issuer and subject; role or
+    organization claims inside tokens are ignored. Callers who are not members
+    of the owning organization receive `404`, exactly as for nonexistent
+    resources, so UUIDs cannot be used to probe other tenants. Members whose
+    role is insufficient receive `403` with a `code`. Only configured platform
+    administrators can create organizations; the creator becomes OWNER.
+
+    | Operation | OWNER | ADMIN | MEMBER | VIEWER |
+    |---|---|---|---|---|
+    | View organization, projects, scans | yes | yes | yes | yes |
+    | Request scan | yes | yes | yes | no |
+    | Register project | yes | yes | no | no |
+    | List members | yes | yes | no | no |
+    | Grant / change / revoke OWNER, ADMIN | yes | no | no | no |
+    | Grant / change / revoke MEMBER, VIEWER | yes | yes | no | no |
+
+    Nobody can change or revoke their own membership.
+
+    **Deployment status.** The API is disabled by default and can currently only
+    be enabled with a literal loopback `server.address` (ADR-0002, ADR-0003).
 
     Conventions:
     - JSON properties use camelCase. Timestamps are UTC RFC 3339 strings with
       microsecond precision. Identifiers are server-generated UUIDs.
     - Unknown request properties are rejected with `400`.
     - Errors use RFC 9457 Problem Details (`application/problem+json`).
-    - Collections use zero-based offset pagination (`page`, `size` ≤ 100).
+    - Collections use zero-based offset pagination (`page`, `size` <= 100).
     - Scan lifecycle transitions are not exposed; they are reserved for trusted
       internal components in later phases.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development (loopback only, `local` profile)
+security:
+  - bearerAuth: []
 tags:
+  - name: Identity
   - name: Organizations
+  - name: Memberships
   - name: Projects
   - name: Scans
 
@@ -46,6 +71,10 @@ paths:
               name: Acme Security
               slug: acme-security
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '201':
           description: Organization created.
           headers:
@@ -74,6 +103,10 @@ paths:
       operationId: getOrganization
       summary: Get an organization
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The organization.
           content:
@@ -110,6 +143,10 @@ paths:
               repositoryName: payments-service
               defaultBranch: main
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '201':
           description: Project created.
           headers:
@@ -144,6 +181,10 @@ paths:
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: A page of projects, oldest first.
           content:
@@ -180,6 +221,10 @@ paths:
       operationId: getProject
       summary: Get a project
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The project.
           content:
@@ -231,6 +276,10 @@ paths:
               branch: feature/login
               triggerType: PULL_REQUEST
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '202':
           description: Scan queued (or an idempotent replay of an earlier request).
           headers:
@@ -283,6 +332,10 @@ paths:
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/Size'
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: A page of scans, newest first.
           content:
@@ -307,6 +360,10 @@ paths:
       operationId: getScan
       summary: Get a scan and its scanner jobs
       responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: The scan.
           content:
@@ -338,10 +395,185 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/me:
+    get:
+      tags: [Identity]
+      operationId: getCurrentUser
+      summary: Get the authenticated caller and their organization roles
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: The caller's identity and server-side memberships.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/current-user.schema.json'
+              example:
+                issuer: https://idp.example.com/realms/sentinel
+                subject: 8f14e45f-ceea-467a-9b36-0d3c3a2f1e11
+                platformAdmin: false
+                memberships:
+                  - organizationId: 0b8f6a0e-6f2b-4d55-9a8b-2c0c4b3f1d10
+                    role: ADMIN
+
+  /api/v1/organizations/{organizationId}/members:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationId'
+    get:
+      tags: [Memberships]
+      operationId: listMemberships
+      summary: List the members of an organization (OWNER, ADMIN)
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: A page of memberships, oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/membership-page.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Memberships]
+      operationId: grantMembership
+      summary: Grant an organization role to a user (OWNER any role; ADMIN only MEMBER/VIEWER)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/create-membership-request.schema.json'
+            example:
+              subject: 8f14e45f-ceea-467a-9b36-0d3c3a2f1e11
+              role: MEMBER
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: Membership created.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/membership.schema.json'
+              example:
+                id: 5b7d9f1a-3c5e-4a7b-9d1f-3a5c7e9b1d3f
+                organizationId: 0b8f6a0e-6f2b-4d55-9a8b-2c0c4b3f1d10
+                issuer: https://idp.example.com/realms/sentinel
+                subject: 8f14e45f-ceea-467a-9b36-0d3c3a2f1e11
+                role: MEMBER
+                createdAt: '2026-10-09T12:03:00Z'
+                updatedAt: '2026-10-09T12:03:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/organizations/{organizationId}/members/{membershipId}:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationId'
+      - $ref: '#/components/parameters/MembershipId'
+    get:
+      tags: [Memberships]
+      operationId: getMembership
+      summary: Get a membership (OWNER, ADMIN)
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The membership.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/membership.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Memberships]
+      operationId: changeMembershipRole
+      summary: Change another member's role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/update-membership-request.schema.json'
+            example:
+              role: VIEWER
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The updated membership.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/membership.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Memberships]
+      operationId: revokeMembership
+      summary: Revoke another member's membership
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '204':
+          description: Membership revoked.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Access token (RFC 9068 `at+jwt` by default) from the configured OIDC
+        provider, sent in the `Authorization` header only. Query-parameter and
+        form-body tokens are not accepted.
   parameters:
     OrganizationId:
       name: organizationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    MembershipId:
+      name: membershipId
       in: path
       required: true
       schema:
@@ -383,6 +615,40 @@ components:
         format: uri-reference
 
   responses:
+    Unauthorized:
+      description: Missing or invalid bearer token. The reason is never disclosed.
+      headers:
+        WWW-Authenticate:
+          description: '`Bearer`, or `Bearer error="invalid_token"` when a token was presented.'
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/v1/problem-details.schema.json'
+          example:
+            type: urn:sentinelpipe:problem:unauthorized
+            title: Unauthorized
+            status: 401
+            detail: A valid bearer access token is required.
+            instance: /api/v1/organizations
+    Forbidden:
+      description: |
+        The caller is a member of the organization but their role does not permit
+        the operation (`insufficient-role`, `role-escalation`,
+        `self-modification`), or a non-administrator tried to create an
+        organization (`platform-admin-required`). Non-members receive `404`.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../schemas/v1/problem-details.schema.json'
+          example:
+            type: urn:sentinelpipe:problem:forbidden
+            title: Forbidden
+            status: 403
+            detail: Your organization role does not permit this operation.
+            instance: /api/v1/organizations/0b8f6a0e-6f2b-4d55-9a8b-2c0c4b3f1d10/projects
+            code: insufficient-role
     BadRequest:
       description: Invalid input (validation error, malformed JSON, unknown property, or malformed path/query parameter).
       content:

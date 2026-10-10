@@ -27,7 +27,8 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 				"SELECT script, success FROM flyway_schema_history WHERE version IS NOT NULL ORDER BY installed_rank");
 
 		assertThat(history).extracting((row) -> row.get("script"))
-			.containsExactly("V001__initial_schema.sql", "V002__core_domain.sql");
+			.containsExactly("V001__initial_schema.sql", "V002__core_domain.sql",
+					"V003__identity_and_memberships.sql");
 		assertThat(history).allSatisfy((row) -> assertThat(row).containsEntry("success", true));
 		assertThat(flyway.info().pending()).isEmpty();
 	}
@@ -58,8 +59,8 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 				String.class);
 
 		// Exactly the tables created by Flyway migrations; Hibernate creates none.
-		assertThat(tables).containsExactly("flyway_schema_history", "organizations", "platform_metadata", "projects",
-				"scan_jobs", "scans");
+		assertThat(tables).containsExactly("flyway_schema_history", "organization_memberships", "organizations",
+				"platform_metadata", "projects", "scan_jobs", "scans", "user_identities");
 	}
 
 }

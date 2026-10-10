@@ -11,7 +11,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
 
 /**
- * Fail-fast guard for the unauthenticated, development-only domain REST API.
+ * Fail-fast guard for the development-stage domain REST API.
  *
  * <p>
  * Active only when {@code sentinel.domain-api.enabled=true}. Startup is aborted unless:
@@ -23,10 +23,10 @@ import org.springframework.core.env.Environment;
  * </ul>
  *
  * <p>
- * This is a development safety net, not an access control mechanism: any local process
- * (or a reverse proxy on the same host) can still reach a loopback-bound server.
- * Production-grade authentication and tenant authorization are required before the
- * domain API may be exposed. See ADR-0002.
+ * Requests are authenticated (JWT) and authorized (organization memberships) since M2
+ * Phase 2A (ADR-0003). The loopback restriction remains as defense in depth until the
+ * remaining production controls (audit, rate limiting, hardened deployment) exist. It is
+ * not itself an access control mechanism. See ADR-0002.
  */
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnDomainApiEnabled
@@ -52,15 +52,15 @@ public class DomainApiExposureGuard implements InitializingBean {
 	@Override
 	public void afterPropertiesSet() {
 		verify(this.environment.getProperty("server.address"), this.environment.getActiveProfiles());
-		log.warn("The UNAUTHENTICATED development domain API is enabled ({}=true) on loopback address {}. "
-				+ "Never expose it to untrusted networks.", ENABLED_PROPERTY,
+		log.warn("The development-stage domain API is enabled ({}=true) on loopback address {}. "
+				+ "It is not yet approved for exposure to untrusted networks.", ENABLED_PROPERTY,
 				this.environment.getProperty("server.address"));
 	}
 
 	static void verify(String serverAddress, String[] activeProfiles) {
 		if (!isLiteralLoopbackAddress(serverAddress)) {
 			throw new IllegalStateException(ENABLED_PROPERTY + "=true requires server.address to be a literal "
-					+ "loopback IP address (for example 127.0.0.1). The domain API has no authentication.");
+					+ "loopback IP address (for example 127.0.0.1). See ADR-0002.");
 		}
 		boolean productionProfile = Arrays.stream(activeProfiles)
 			.map((profile) -> profile.toLowerCase(Locale.ROOT))
@@ -68,7 +68,7 @@ public class DomainApiExposureGuard implements InitializingBean {
 		if (productionProfile) {
 			throw new IllegalStateException(
 					ENABLED_PROPERTY + "=true is not permitted with a production profile. "
-							+ "The domain API has no authentication.");
+							+ "See ADR-0002.");
 		}
 	}
 

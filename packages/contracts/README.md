@@ -18,7 +18,11 @@ Machine-readable contracts of the SentinelPipe control plane API.
 | `scan-request.schema.json` | `POST /api/v1/projects/{id}/scans` body |
 | `scan.schema.json` | Scan response, including its jobs |
 | `scan-job.schema.json` | Scanner job representation |
-| `project-page.schema.json`, `scan-page.schema.json`, `page-metadata.schema.json` | Paginated collections |
+| `membership.schema.json` | Organization membership response |
+| `create-membership-request.schema.json` | `POST /api/v1/organizations/{id}/members` body |
+| `update-membership-request.schema.json` | `PUT /api/v1/organizations/{id}/members/{membershipId}` body |
+| `current-user.schema.json` | `GET /api/v1/me` response |
+| `project-page.schema.json`, `scan-page.schema.json`, `membership-page.schema.json`, `page-metadata.schema.json` | Paginated collections |
 | `problem-details.schema.json` | RFC 9457 error responses |
 | `common.schema.json` | Shared value types (`$defs`) |
 
@@ -48,7 +52,15 @@ The API test suite (`services/sentinel-api`, `ContractIntegrationTests` and
 - real API responses validate against the corresponding schemas;
 - every request/response example in the OpenAPI document validates against its schema;
 - the set of `/api/v1` operations in the OpenAPI document exactly matches the operations
-  registered by the application.
+  registered by the application;
+- the document declares the `bearerAuth` scheme globally, no operation overrides it, and
+  every operation documents `401` (and `403`, except `GET /api/v1/me`).
+
+## Security
+
+All operations require an OAuth 2.0 bearer access token (JWT) from the configured OIDC
+provider. Authorization is based on server-side organization memberships; see the
+OpenAPI `info.description` and [ADR-0003](../../docs/adr/0003-identity-and-tenant-authorization.md).
 
 Not yet automated: validation of the OpenAPI document against the official OpenAPI 3.1
 meta-schema, and breaking-change detection between contract versions.

@@ -1,6 +1,9 @@
 package dev.sentinelpipe.api.scan;
 
+import dev.sentinelpipe.api.authorization.AccessControl;
+import dev.sentinelpipe.api.authorization.OrganizationPermission;
 import dev.sentinelpipe.api.common.PageResponse;
+import dev.sentinelpipe.api.project.ProjectService;
 import dev.sentinelpipe.api.common.Pagination;
 import dev.sentinelpipe.api.security.ConditionalOnDomainApiEnabled;
 import jakarta.validation.Valid;
@@ -35,8 +38,20 @@ class ScanController {
 
 	private final ScanService scanService;
 
-	ScanController(ScanService scanService) {
+	private final ProjectService projectService;
+
+	private final AccessControl accessControl;
+
+	ScanController(ScanService scanService, ProjectService projectService, AccessControl accessControl) {
 		this.scanService = scanService;
+		this.projectService = projectService;
+		this.accessControl = accessControl;
+	}
+
+	/** Authorizes against the organization that owns the project; 404 for non-members. */
+	private void requireOnProject(UUID projectId, OrganizationPermission permission) {
+		UUID organizationId = this.projectService.get(projectId).getOrganizationId();
+		this.accessControl.require(organizationId, permission, "Project", projectId);
 	}
 
 	/** Returns 202: the scan is queued, not performed, by this request. */
@@ -46,6 +61,8 @@ class ScanController {
 					regexp = ScanService.IDEMPOTENCY_KEY_REGEX,
 					message = "must be 1-128 characters: letters, digits, '.', '_', ':' or '-'") String idempotencyKey,
 			@Valid @RequestBody CreateScanRequest request) {
+		// Authorization precedes idempotent replay: a key never reveals another tenant's scan.
+		requireOnProject(projectId, OrganizationPermission.REQUEST_SCAN);
 		ScanService.ScanRequestOutcome outcome = this.scanService.requestScan(projectId, request.commitSha(),
 				request.branch(), request.triggerType(), idempotencyKey);
 		ScanResponse body = ScanResponse.from(outcome.details());
@@ -57,13 +74,17 @@ class ScanController {
 
 	@GetMapping("/scans/{scanId}")
 	ScanResponse get(@PathVariable("scanId") UUID scanId) {
-		return ScanResponse.from(this.scanService.get(scanId));
+		ScanDetails details = this.scanService.get(scanId);
+		UUID organizationId = this.projectService.get(details.scan().getProjectId()).getOrganizationId();
+		this.accessControl.require(organizationId, OrganizationPermission.VIEW_SCANS, "Scan", scanId);
+		return ScanResponse.from(details);
 	}
 
 	@GetMapping("/projects/{projectId}/scans")
 	PageResponse<ScanResponse> list(@PathVariable("projectId") UUID projectId,
 			@RequestParam(name = "page", defaultValue = Pagination.DEFAULT_PAGE) @Min(0) @Max(Pagination.MAX_PAGE) int page,
 			@RequestParam(name = "size", defaultValue = Pagination.DEFAULT_SIZE) @Min(1) @Max(Pagination.MAX_SIZE) int size) {
+		requireOnProject(projectId, OrganizationPermission.VIEW_SCANS);
 		return PageResponse.of(this.scanService.listByProject(projectId, page, size), ScanResponse::from);
 	}
 

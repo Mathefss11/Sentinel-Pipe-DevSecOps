@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/membership-page.schema.json",
+  "title": "MembershipPage",
+  "description": "A page of organization memberships, ordered by creation time (oldest first).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "page"],
+  "properties": {
+    "items": { "type": "array", "maxItems": 100, "items": { "$ref": "membership.schema.json" } },
+    "page": { "$ref": "page-metadata.schema.json" }
+  }
+}

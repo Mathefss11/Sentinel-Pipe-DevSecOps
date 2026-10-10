@@ -33,8 +33,9 @@ class HealthEndpointIntegrationTests extends AbstractIntegrationTest {
 
 	@Test
 	void nonHealthActuatorEndpointsAreNotExposed() throws Exception {
-		mockMvc.perform(get("/actuator/env")).andExpect(status().isNotFound());
-		mockMvc.perform(get("/actuator/configprops")).andExpect(status().isNotFound());
+		// Default deny: rejected by the security filter chain before any endpoint lookup.
+		mockMvc.perform(get("/actuator/env")).andExpect(status().isForbidden());
+		mockMvc.perform(get("/actuator/configprops")).andExpect(status().isForbidden());
 	}
 
 }

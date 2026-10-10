@@ -1,6 +1,8 @@
 # ADR-0002: Disable the domain API by default until authentication exists
 
-- **Status:** Accepted (pending owner review)
+- **Status:** Accepted (pending owner review). Amended by
+  [ADR-0003](0003-identity-and-tenant-authorization.md): authentication and tenant
+  authorization now exist; the default-off switch and the loopback guard remain.
 - **Date:** 2026-10-09
 - **Milestone:** M2 Phase 1
 

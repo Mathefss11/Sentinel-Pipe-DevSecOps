@@ -37,6 +37,18 @@
       "description": "Full Git commit object name: 40 (SHA-1) or 64 (SHA-256) lowercase hexadecimal characters.",
       "type": "string",
       "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    },
+    "subject": {
+      "description": "OIDC subject (`sub` claim) of a user, unique per issuer. Control characters are rejected.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F]+$"
+    },
+    "organizationRole": {
+      "description": "Organization role, from most to least privileged.",
+      "type": "string",
+      "enum": ["OWNER", "ADMIN", "MEMBER", "VIEWER"]
     }
   }
 }

@@ -1,5 +1,7 @@
 package dev.sentinelpipe.api.project;
 
+import dev.sentinelpipe.api.authorization.AccessControl;
+import dev.sentinelpipe.api.authorization.OrganizationPermission;
 import dev.sentinelpipe.api.common.PageResponse;
 import dev.sentinelpipe.api.common.Pagination;
 import dev.sentinelpipe.api.security.ConditionalOnDomainApiEnabled;
@@ -25,13 +27,17 @@ class ProjectController {
 
 	private final ProjectService projectService;
 
-	ProjectController(ProjectService projectService) {
+	private final AccessControl accessControl;
+
+	ProjectController(ProjectService projectService, AccessControl accessControl) {
 		this.projectService = projectService;
+		this.accessControl = accessControl;
 	}
 
 	@PostMapping(path = "/organizations/{organizationId}/projects", consumes = MediaType.APPLICATION_JSON_VALUE)
 	ResponseEntity<ProjectResponse> create(@PathVariable("organizationId") UUID organizationId,
 			@Valid @RequestBody CreateProjectRequest request) {
+		this.accessControl.requireOnOrganization(organizationId, OrganizationPermission.REGISTER_PROJECT);
 		Project project = this.projectService.register(organizationId, request.name(), request.repositoryProvider(),
 				request.repositoryOwner(), request.repositoryName(), request.defaultBranch());
 		return ResponseEntity.created(URI.create("/api/v1/projects/" + project.getId()))
@@ -42,13 +48,18 @@ class ProjectController {
 	PageResponse<ProjectResponse> list(@PathVariable("organizationId") UUID organizationId,
 			@RequestParam(name = "page", defaultValue = Pagination.DEFAULT_PAGE) @Min(0) @Max(Pagination.MAX_PAGE) int page,
 			@RequestParam(name = "size", defaultValue = Pagination.DEFAULT_SIZE) @Min(1) @Max(Pagination.MAX_SIZE) int size) {
+		this.accessControl.requireOnOrganization(organizationId, OrganizationPermission.VIEW_PROJECTS);
 		return PageResponse.of(this.projectService.listByOrganization(organizationId, page, size),
 				ProjectResponse::from);
 	}
 
+	/** A project of an organization the caller does not belong to is reported as not found. */
 	@GetMapping("/projects/{projectId}")
 	ProjectResponse get(@PathVariable("projectId") UUID projectId) {
-		return ProjectResponse.from(this.projectService.get(projectId));
+		Project project = this.projectService.get(projectId);
+		this.accessControl.require(project.getOrganizationId(), OrganizationPermission.VIEW_PROJECTS, "Project",
+				projectId);
+		return ProjectResponse.from(project);
 	}
 
 }

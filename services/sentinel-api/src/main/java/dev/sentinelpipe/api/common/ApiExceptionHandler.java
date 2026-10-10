@@ -10,6 +10,8 @@ import org.springframework.beans.TypeMismatchException;
 import org.springframework.core.MethodParameter;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -63,6 +65,30 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 				ex.getMessage());
 		response.getBody().setProperty("code", ex.getCode());
 		return response;
+	}
+
+	@ExceptionHandler(ForbiddenException.class)
+	ResponseEntity<ProblemDetail> handleForbidden(ForbiddenException ex) {
+		ResponseEntity<ProblemDetail> response = problem(HttpStatus.FORBIDDEN, ProblemTypes.FORBIDDEN, "Forbidden",
+				ex.getMessage());
+		response.getBody().setProperty("code", ex.getCode());
+		return response;
+	}
+
+	/**
+	 * Spring Security exceptions raised inside a handler must not fall through to the
+	 * generic 500 handler. Authentication failures are 401; everything else is 403.
+	 */
+	@ExceptionHandler(AuthenticationException.class)
+	ResponseEntity<ProblemDetail> handleAuthentication(AuthenticationException ex) {
+		return problem(HttpStatus.UNAUTHORIZED, ProblemTypes.UNAUTHORIZED, "Unauthorized",
+				"A valid bearer access token is required.");
+	}
+
+	@ExceptionHandler(AccessDeniedException.class)
+	ResponseEntity<ProblemDetail> handleAccessDenied(AccessDeniedException ex) {
+		return problem(HttpStatus.FORBIDDEN, ProblemTypes.FORBIDDEN, "Forbidden",
+				"Access to this resource is not permitted.");
 	}
 
 	@ExceptionHandler(IdempotencyKeyReuseException.class)

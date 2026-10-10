@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/update-membership-request.schema.json",
+  "title": "UpdateMembershipRequest",
+  "description": "Changes the role of another member. The caller must be allowed to manage both the current and the requested role, and cannot change their own membership.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["role"],
+  "properties": {
+    "role": { "$ref": "common.schema.json#/$defs/organizationRole" }
+  }
+}

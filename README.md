@@ -7,12 +7,13 @@ against versioned security policies, and publish actionable remediation reports 
 It is also a cybersecurity engineering portfolio project. The emphasis is on secure design,
 verifiable behavior, and honest reporting of coverage and limitations.
 
-> **Status: Milestone 2, Phase 1 (Domain model & REST contracts).** The control plane can
-> register organizations and GitHub-hosted projects, accept scan requests for specific
-> commits, and track scan and scanner-job lifecycles in PostgreSQL. **Authentication,
-> tenant authorization, scanning, policy evaluation and GitHub integration are not
-> implemented yet.** The domain API is therefore disabled by default and is meant for
-> local, loopback-only development (see [Security limitations](#current-security-limitations)).
+> **Status: Milestone 2, Phase 2A (Identity & tenant authorization).** The control plane
+> registers organizations and GitHub-hosted projects, accepts scan requests for specific
+> commits, and tracks scan and scanner-job lifecycles in PostgreSQL. Every API request is
+> authenticated with OIDC access tokens (JWT) and authorized against server-side
+> organization memberships. **Scanning, policy evaluation and GitHub integration are not
+> implemented yet**, and the domain API is still restricted to loopback, development-stage
+> use (see [Security limitations](#current-security-limitations)).
 
 ## Architecture overview
 
@@ -52,12 +53,18 @@ scanning and privileged publication, fail-closed security decisions (`PASS` / `F
 ## Domain model
 
 ```text
+UserIdentity 1 ──── * OrganizationMembership * ──── 1 Organization
+ (iss + sub)          (OWNER|ADMIN|MEMBER|VIEWER)       (tenant)
+                                                             1
+                                                             │
 Organization 1 ──── * Project 1 ──── * Scan 1 ──── * ScanJob
  (tenant)        (GitHub repo)    (one commit)   (one scanner run)
 ```
 
 | Entity | Key rules |
 |---|---|
+| `UserIdentity` | An external OIDC user, identified only by token issuer and subject. No passwords or profile data. Created when a membership is granted, not on login. |
+| `OrganizationMembership` | One role per user per organization; the server-side source of truth for authorization. Records who granted it. |
 | `Organization` | Unique, immutable `slug` (`^[a-z0-9]+(-[a-z0-9]+)*$`, ≤ 63). Display names are trimmed and may not contain control characters. |
 | `Project` | Belongs to exactly one organization. Identified by provider (`GITHUB`), owner and repository name, normalized to lowercase. URLs are never accepted. A repository can be registered once per organization. Nothing is cloned or executed. |
 | `Scan` | Requested for a **full** commit SHA (40 or 64 hex characters) and a branch. `executionStatus` and `securityDecision` are independent dimensions. |
@@ -178,57 +185,137 @@ Invoke-RestMethod http://127.0.0.1:8080/actuator/health
 The application deliberately refuses to start if `SENTINEL_DB_PASSWORD` or
 `SENTINEL_RABBITMQ_PASSWORD` is missing.
 
-With the default configuration, only the health endpoints exist. To use the domain API
-locally, start the application with the `local` profile. It binds the server to
-`127.0.0.1` and enables `/api/v1`:
+With the default configuration, only the health endpoints are reachable; every other
+request is denied. To use the domain API locally, configure an identity provider (below)
+and start the application with the `local` profile. It binds the server to `127.0.0.1`
+and enables `/api/v1`:
 
 ```powershell
 .\mvnw.cmd spring-boot:run "-Dspring-boot.run.profiles=local"
 ```
 
-Startup fails on purpose if the domain API is enabled while `server.address` is not a
-literal loopback IP, or if a `prod`/`production` profile is active
-([ADR-0002](docs/adr/0002-domain-api-exposure-before-authentication.md)).
+Startup fails on purpose if the domain API is enabled while the identity settings are
+incomplete, `server.address` is not a literal loopback IP, or a `prod`/`production`
+profile is active ([ADR-0002](docs/adr/0002-domain-api-exposure-before-authentication.md),
+[ADR-0003](docs/adr/0003-identity-and-tenant-authorization.md)).
 
-### 4. Use the domain API (local profile)
+### 4. Identity provider setup
+
+SentinelPipe does not store passwords or run a login flow. Users authenticate with an
+external OpenID Connect provider (for example Keycloak, Microsoft Entra ID, Auth0 or
+Okta), and the API validates the provider's **access tokens**. Configure (environment
+variables or `.env` loaded into the shell):
+
+| Variable | Value |
+|---|---|
+| `SENTINEL_SECURITY_JWT_ISSUER` | Exact `iss` of the access tokens (from the provider's discovery document) |
+| `SENTINEL_SECURITY_JWT_AUDIENCE` | Audience the provider puts in `aud` for this API |
+| `SENTINEL_SECURITY_JWT_JWK_SET_URI` | The provider's `jwks_uri` (HTTPS; plain HTTP only for a loopback provider) |
+| `SENTINEL_SECURITY_PLATFORM_ADMIN_SUBJECTS` | Comma-separated `sub` values allowed to create organizations |
+| `SENTINEL_SECURITY_JWT_TOKEN_TYPES` | Optional. Default `at+jwt` (RFC 9068). Add `JWT` only for providers that do not emit `at+jwt` |
+| `SENTINEL_SECURITY_JWT_JWS_ALGORITHMS` | Optional. Default `RS256`; only asymmetric RS/ES/PS algorithms are accepted |
+
+None of these values is a secret. There is no shared-secret (HMAC) option and no
+development bypass: the `local` profile requires real tokens.
+
+**Access-token `typ` compatibility.** By default the API accepts only tokens whose JOSE
+header has `typ: at+jwt` (or `application/at+jwt`, case-insensitive), the access-token type
+defined by RFC 9068. Tokens with `typ: JWT` or without `typ` are rejected. This prevents
+OIDC **ID tokens**, which are not access tokens, from being replayed against the API.
+
+Not every provider emits `at+jwt`. Some issue access tokens with `typ: JWT`, the same value
+used for ID tokens, depending on product and configuration. Before deploying, decode the
+header of a real access token from your provider (locally; never paste tokens into online
+tools) and check its `typ`:
+
+- `at+jwt`: keep the default.
+- `JWT`: prefer enabling RFC 9068 access tokens in the provider, if it supports that. Only
+  otherwise, set `SENTINEL_SECURITY_JWT_TOKEN_TYPES=JWT`. The header then no longer
+  distinguishes ID tokens from access tokens, and the **audience check becomes the only
+  barrier**. Configure a dedicated API audience, for example `sentinel-api`, that the
+  provider adds to access tokens, and **never use an OAuth client ID as the audience**: ID
+  tokens carry the client ID in `aud`.
+- No `typ`: not supported. Tokens without `typ` are always rejected.
+
+**Bootstrap procedure for the first organization owner**
+
+1. Configure the provider and the variables above. Find your user's `sub` claim, for
+   example by decoding a token you obtained from the provider (do not paste tokens into
+   online tools).
+2. Set `SENTINEL_SECURITY_PLATFORM_ADMIN_SUBJECTS` to that subject and start the API.
+3. As that user, `POST /api/v1/organizations`. The creator becomes the organization's
+   first `OWNER` in the same transaction.
+4. Grant roles to other users with `POST /api/v1/organizations/{id}/members`
+   (`{"subject": "...", "role": "ADMIN"}`).
+5. Optionally remove yourself from `SENTINEL_SECURITY_PLATFORM_ADMIN_SUBJECTS` and
+   restart. Platform administrators can only create organizations; they have no access
+   to existing ones.
+
+Organizations created before M2 Phase 2A have no members and are therefore inaccessible
+through the API. Recreate local development data, or insert an `OWNER` membership
+manually with SQL as a one-off, reviewed operation.
+
+### 5. Use the domain API (local profile)
 
 ```powershell
 $api = 'http://127.0.0.1:8080/api/v1'
+# An access token from your identity provider (never commit or log it).
+$auth = @{ Authorization = "Bearer $env:SENTINEL_ACCESS_TOKEN" }
 
-$org = Invoke-RestMethod -Method Post "$api/organizations" -ContentType 'application/json' `
+Invoke-RestMethod "$api/me" -Headers $auth
+
+$org = Invoke-RestMethod -Method Post "$api/organizations" -Headers $auth -ContentType 'application/json' `
     -Body '{"name": "Acme Security", "slug": "acme-security"}'
 
-$project = Invoke-RestMethod -Method Post "$api/organizations/$($org.id)/projects" `
+Invoke-RestMethod -Method Post "$api/organizations/$($org.id)/members" -Headers $auth `
+    -ContentType 'application/json' -Body '{"subject": "<user-sub>", "role": "MEMBER"}'
+
+$project = Invoke-RestMethod -Method Post "$api/organizations/$($org.id)/projects" -Headers $auth `
     -ContentType 'application/json' `
     -Body '{"name": "Payments", "repositoryProvider": "GITHUB", "repositoryOwner": "acme-corp",
             "repositoryName": "payments-service", "defaultBranch": "main"}'
 
 # 202 Accepted. Retrying with the same Idempotency-Key returns the same scan.
 $scan = Invoke-RestMethod -Method Post "$api/projects/$($project.id)/scans" `
-    -ContentType 'application/json' -Headers @{ 'Idempotency-Key' = 'manual-run-1' } `
+    -ContentType 'application/json' -Headers ($auth + @{ 'Idempotency-Key' = 'manual-run-1' }) `
     -Body '{"commitSha": "4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e", "branch": "main",
             "triggerType": "MANUAL"}'
 
-Invoke-RestMethod "$api/scans/$($scan.id)"
-Invoke-RestMethod "$api/projects/$($project.id)/scans?page=0&size=20"
+Invoke-RestMethod "$api/scans/$($scan.id)" -Headers $auth
+Invoke-RestMethod "$api/projects/$($project.id)/scans?page=0&size=20" -Headers $auth
 ```
 
-| Method | Path | Success |
-|---|---|---|
-| `POST` | `/api/v1/organizations` | `201` + `Location` |
-| `GET` | `/api/v1/organizations/{organizationId}` | `200` |
-| `POST` | `/api/v1/organizations/{organizationId}/projects` | `201` + `Location` |
-| `GET` | `/api/v1/organizations/{organizationId}/projects?page&size` | `200` (oldest first) |
-| `GET` | `/api/v1/projects/{projectId}` | `200` |
-| `POST` | `/api/v1/projects/{projectId}/scans` | `202` + `Location`, optional `Idempotency-Key` |
-| `GET` | `/api/v1/projects/{projectId}/scans?page&size` | `200` (newest first) |
-| `GET` | `/api/v1/scans/{scanId}` | `200` (includes jobs) |
+| Method | Path | Success | Minimum role |
+|---|---|---|---|
+| `GET` | `/api/v1/me` | `200` | any authenticated user |
+| `POST` | `/api/v1/organizations` | `201` + `Location` | platform administrator |
+| `GET` | `/api/v1/organizations/{organizationId}` | `200` | VIEWER |
+| `GET` | `/api/v1/organizations/{organizationId}/members?page&size` | `200` | ADMIN |
+| `POST` | `/api/v1/organizations/{organizationId}/members` | `201` + `Location` | ADMIN (MEMBER/VIEWER only), OWNER (any) |
+| `GET` | `/api/v1/organizations/{organizationId}/members/{membershipId}` | `200` | ADMIN |
+| `PUT` | `/api/v1/organizations/{organizationId}/members/{membershipId}` | `200` | ADMIN (MEMBER/VIEWER only), OWNER (any) |
+| `DELETE` | `/api/v1/organizations/{organizationId}/members/{membershipId}` | `204` | ADMIN (MEMBER/VIEWER only), OWNER (any) |
+| `POST` | `/api/v1/organizations/{organizationId}/projects` | `201` + `Location` | ADMIN |
+| `GET` | `/api/v1/organizations/{organizationId}/projects?page&size` | `200` (oldest first) | VIEWER |
+| `GET` | `/api/v1/projects/{projectId}` | `200` | VIEWER |
+| `POST` | `/api/v1/projects/{projectId}/scans` | `202` + `Location`, optional `Idempotency-Key` | MEMBER |
+| `GET` | `/api/v1/projects/{projectId}/scans?page&size` | `200` (newest first) | VIEWER |
+| `GET` | `/api/v1/scans/{scanId}` | `200` (includes jobs) | VIEWER |
+
+**Authorization rules.** Roles are hierarchical (OWNER ⊃ ADMIN ⊃ MEMBER ⊃ VIEWER) and
+stored server-side; role, scope or organization claims inside tokens are ignored. A caller
+who is not a member of the owning organization receives `404`, exactly as for a resource
+that does not exist, so knowing a UUID neither grants access nor confirms existence. A
+member whose role is insufficient receives `403` with a `code`. Nobody can grant a role
+they cannot manage, and nobody can change or revoke their own membership. An organization
+always keeps at least one OWNER.
 
 Errors are RFC 9457 Problem Details (`application/problem+json`): `400` validation, malformed
-JSON or unknown property; `404` not found; `409` conflict, with a machine-readable `code`;
-`415` non-JSON body; `422` an `Idempotency-Key` reused for a different request. Error
-responses never contain stack traces, exception names or rejected input values. Pagination
-is zero-based, with `size` ≤ 100.
+JSON or unknown property; `401` missing or invalid token (the reason is never disclosed);
+`403` insufficient role, with a `code`; `404` not found or not visible; `409` conflict, with a
+machine-readable `code`; `415` non-JSON body; `422` an `Idempotency-Key` reused for a
+different request. Error responses never contain stack traces, exception names or rejected
+input values. Pagination is zero-based, with `size` ≤ 100.
 
 The full contract is in [`packages/contracts`](packages/contracts/README.md).
 
@@ -237,7 +324,7 @@ constraint `uq_scans_project_idempotency_key`, together with a SHA-256 fingerpri
 normalized request. Concurrent retries create at most one scan. In-memory locks are not
 relied on. Keys do not expire yet.
 
-### 5. Set up the worker
+### 6. Set up the worker
 
 ```powershell
 Set-Location services\sentinel-worker
@@ -264,14 +351,25 @@ It does not connect to external services.
 The API integration tests start their own PostgreSQL and RabbitMQ containers through
 Testcontainers, pinned to the same image digests as `compose.yaml`. They do not use the
 Compose stack. Two application contexts are used: the default configuration and one
-with the domain API enabled on loopback. The tests verify that:
+with the domain API enabled on loopback. The second uses the production JWT decoder with
+a test-only RSA key pair generated in memory at test start; no private key is stored in
+the repository. The tests verify that:
 
 - the application context starts against real PostgreSQL and RabbitMQ;
-- Flyway applies `V001` and `V002` to a fresh database with valid checksums and no
-  pending migrations. Hibernate only validates the schema and creates no tables;
+- Flyway applies `V001`–`V003` to a fresh database with valid checksums and no pending
+  migrations. Hibernate only validates the schema and creates no tables;
 - `/actuator/health`, liveness and readiness are `UP` without exposing component details;
-- with the default configuration, no `/api/**` route exists. The exposure guard rejects
-  non-loopback bindings and production profiles;
+- with the default configuration, no `/api/**` route or token decoder exists and every
+  non-health request is denied. The exposure guard rejects non-loopback bindings and
+  production profiles, and incomplete identity configuration aborts startup;
+- missing, expired, not-yet-valid, wrong-issuer, wrong-audience, wrong-`typ`, unsigned
+  (`alg: none`), HMAC key-confusion, foreign-key, tampered and malformed tokens are
+  rejected with `401` without revealing the reason;
+- every registered `/api` operation (discovered automatically) rejects anonymous callers
+  and authenticated outsiders, so a new unprotected endpoint fails the build;
+- each role can perform exactly the operations of the authorization matrix; cross-tenant
+  reads and writes by UUID return `404` and change nothing; role escalation and
+  self-modification are rejected; concurrent mutual demotion of two OWNERs leaves one;
 - organizations, projects and scans follow their validation, uniqueness, normalization,
   pagination and Problem Details rules;
 - scan and job state machines reject invalid and terminal-state transitions, and `PASS`
@@ -328,21 +426,37 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 - [x] OpenAPI 3.1 and JSON Schema 2020-12 contracts, with automated contract tests
 - [x] Domain API disabled by default; loopback-only `local` profile with a fail-fast guard
 - [x] ADR-0001 (modular monolith) and ADR-0002 (API exposure before authentication)
-- [ ] Authentication and organization-scoped authorization (next phase)
+- [x] Authentication and organization-scoped authorization (Phase 2A)
 - [ ] Transactional outbox and event publication (next phase)
+
+## Milestone 2, Phase 2A checklist
+
+- [x] OAuth 2.0 Resource Server with strict JWT validation (issuer, audience, signature,
+  expiry, `typ`, asymmetric algorithms only)
+- [x] `UserIdentity` keyed by issuer and subject; Flyway `V003__identity_and_memberships.sql`
+- [x] Organization memberships with OWNER, ADMIN, MEMBER and VIEWER roles
+- [x] Authorization on every domain endpoint; IDOR-safe `404` for non-members
+- [x] Role-escalation and self-modification prevention; last-OWNER protection under concurrency
+- [x] Platform-administrator bootstrap for the first organization owner
+- [x] OpenAPI security scheme, membership endpoints and JSON Schemas
+- [x] ADR-0003 (identity and tenant authorization)
 
 ## Architecture decisions
 
 - [ADR-0001: Modular monolith control plane](docs/adr/0001-modular-monolith-control-plane.md)
 - [ADR-0002: Domain API disabled until authentication exists](docs/adr/0002-domain-api-exposure-before-authentication.md)
+- [ADR-0003: External OIDC identity and membership-based tenant authorization](docs/adr/0003-identity-and-tenant-authorization.md)
 
 ## Current security limitations
 
-- **No authentication or tenant authorization.** Any caller that can reach the API can
-  read and write every organization's data. This is why the domain API is disabled by
-  default and restricted to loopback in the `local` profile. Loopback binding is not
-  access control: other local processes can still reach it. Production-grade identity
-  and organization-scoped authorization are required before any external deployment.
+- **Not yet approved for external deployment.** Authentication and tenant authorization
+  are enforced, but audit logging of security-relevant events, rate limiting and a
+  hardened deployment are missing. The domain API therefore remains disabled by default
+  and loopback-only.
+- Revoking a membership takes effect on the next request, but access tokens themselves
+  stay valid until they expire; there is no token revocation or introspection.
+- A single trusted token issuer is supported. Machine identities (GitHub App, Actions
+  OIDC) arrive in M5.
 - `triggerType` and `branch` are supplied by the caller and not yet verified against
   GitHub events or Actions OIDC claims.
 - Idempotency keys do not expire, and there is no rate limiting.
@@ -354,7 +468,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 | Milestone | Scope |
 |---|---|
 | M1 — Foundation | Complete |
-| **M2 — Domain & Contracts** | Phase 1 complete (see checklist); remaining: authorization groundwork, outbox |
+| **M2 — Domain & Contracts** | Phases 1 and 2A complete (see checklists); remaining: transactional outbox, idempotency-key expiry |
 | M3 — Scanners | Discovery, Semgrep/Gitleaks/Trivy adapters, normalized findings, correlation |
 | M4 — Security Gate & Remediation | OPA policies, coverage, exceptions, decisions, remediation reports |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |

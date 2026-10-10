@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/current-user.schema.json",
+  "title": "CurrentUser",
+  "description": "The authenticated caller and their organization roles, as stored server-side. Role or organization claims in the access token are not reflected here and are never used for authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["issuer", "subject", "platformAdmin", "memberships"],
+  "properties": {
+    "issuer": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "subject": { "$ref": "common.schema.json#/$defs/subject" },
+    "platformAdmin": {
+      "description": "True if the caller may create organizations (configured bootstrap administrators).",
+      "type": "boolean"
+    },
+    "memberships": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["organizationId", "role"],
+        "properties": {
+          "organizationId": { "$ref": "common.schema.json#/$defs/uuid" },
+          "role": { "$ref": "common.schema.json#/$defs/organizationRole" }
+        }
+      }
+    }
+  }
+}

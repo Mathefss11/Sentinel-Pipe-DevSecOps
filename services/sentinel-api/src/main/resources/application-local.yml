@@ -1,8 +1,10 @@
 # Local development profile: activate explicitly with `--spring.profiles.active=local`.
 #
-# Enables the UNAUTHENTICATED domain REST API (/api/v1) and binds the server to the
-# IPv4 loopback interface only. Never use this profile on a shared host or behind a
-# reverse proxy: anything that can reach 127.0.0.1:8080 has full API access.
+# Enables the domain REST API (/api/v1) and binds the server to the IPv4 loopback
+# interface only. Every /api request still requires a valid access token from the
+# configured OIDC provider: there is no development authentication bypass. Startup fails
+# unless SENTINEL_SECURITY_JWT_ISSUER, SENTINEL_SECURITY_JWT_AUDIENCE and
+# SENTINEL_SECURITY_JWT_JWK_SET_URI are set (see README, "Identity provider setup").
 server:
   address: 127.0.0.1
 

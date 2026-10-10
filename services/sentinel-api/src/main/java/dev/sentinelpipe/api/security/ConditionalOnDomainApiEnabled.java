@@ -11,12 +11,13 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnBooleanProp
  * Registers the annotated component only when {@code sentinel.domain-api.enabled=true}.
  *
  * <p>
- * The domain REST API has no authentication or tenant authorization yet, so its
- * controllers are not registered by default and their routes do not exist. See
- * {@link DomainApiExposureGuard} and ADR-0002.
+ * The domain REST API is disabled by default: its controllers are not registered and the
+ * security filter chain denies {@code /api/**}. When enabled, it requires valid JWT
+ * configuration and a loopback binding. See {@link DomainApiExposureGuard}, ADR-0002 and
+ * ADR-0003.
  */
 @Documented
-@Target(ElementType.TYPE)
+@Target({ ElementType.TYPE, ElementType.METHOD })
 @Retention(RetentionPolicy.RUNTIME)
 @ConditionalOnBooleanProperty(name = DomainApiExposureGuard.ENABLED_PROPERTY)
 public @interface ConditionalOnDomainApiEnabled {

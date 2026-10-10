@@ -195,6 +195,56 @@ class DatabaseConstraintIntegrationTests extends AbstractDomainApiIntegrationTes
 			.hasMessageContaining("ck_scans_idempotency_pair");
 	}
 
+	private UUID insertIdentity(String subject) {
+		UUID id = UUID.randomUUID();
+		this.jdbcTemplate.update(
+				"INSERT INTO user_identities (id, issuer, subject, version, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)",
+				id, TestJwts.ISSUER, subject, NOW, NOW);
+		return id;
+	}
+
+	private void insertMembership(UUID organizationId, UUID identityId, String role, UUID grantedBy) {
+		this.jdbcTemplate.update("""
+				INSERT INTO organization_memberships (id, organization_id, user_identity_id, role, granted_by,
+				    version, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+				""", UUID.randomUUID(), organizationId, identityId, role, grantedBy, NOW, NOW);
+	}
+
+	@Test
+	void identitiesAreUniquePerIssuerAndSubject() {
+		String subject = uniqueSubject("db");
+		insertIdentity(subject);
+
+		assertThatThrownBy(() -> insertIdentity(subject)).isInstanceOf(DataIntegrityViolationException.class)
+			.hasMessageContaining("uq_user_identities_issuer_subject");
+		assertThatThrownBy(() -> insertIdentity("   ")).hasMessageContaining("ck_user_identities_subject_format");
+		assertThatThrownBy(() -> insertIdentity("line\nbreak")).hasMessageContaining("ck_user_identities_subject_format");
+	}
+
+	@Test
+	void membershipsAreUniqueTypedAndNeverSelfGranted() {
+		UUID organizationId = insertOrganization();
+		UUID owner = insertIdentity(uniqueSubject("owner"));
+		UUID user = insertIdentity(uniqueSubject("user"));
+		insertMembership(organizationId, owner, "OWNER", null);
+		insertMembership(organizationId, user, "MEMBER", owner);
+
+		assertThatThrownBy(() -> insertMembership(organizationId, user, "ADMIN", owner))
+			.isInstanceOf(DataIntegrityViolationException.class)
+			.hasMessageContaining("uq_organization_memberships_organization_user");
+		assertThatThrownBy(() -> insertMembership(insertOrganization(), user, "SUPERUSER", owner))
+			.hasMessageContaining("ck_organization_memberships_role");
+		assertThatThrownBy(() -> insertMembership(insertOrganization(), user, "OWNER", user))
+			.hasMessageContaining("ck_organization_memberships_not_self_granted");
+		assertThatThrownBy(() -> insertMembership(UUID.randomUUID(), user, "VIEWER", owner))
+			.hasMessageContaining("fk_organization_memberships_organization");
+		assertThatThrownBy(() -> insertMembership(organizationId, UUID.randomUUID(), "VIEWER", owner))
+			.hasMessageContaining("fk_organization_memberships_user_identity");
+		assertThatThrownBy(() -> this.jdbcTemplate.update("DELETE FROM user_identities WHERE id = ?", user))
+			.hasMessageContaining("fk_organization_memberships_user_identity");
+	}
+
 	@Test
 	void scanJobsAreUniquePerScannerAndBounded() {
 		UUID scanId = insertQueuedScan(insertProject());
