@@ -26,6 +26,20 @@ Machine-readable contracts of the SentinelPipe control plane API.
 | `problem-details.schema.json` | RFC 9457 error responses |
 | `common.schema.json` | Shared value types (`$defs`) |
 
+## Message contracts (RabbitMQ)
+
+| File | Describes |
+|---|---|
+| `messages/v1/scan-requested.v1.schema.json` | `scan.requested` v1 event (outbox → worker). Self-contained, snake_case, no credentials |
+| `messages/v1/processing-receipt.v1.schema.json` | Durable worker receipt committed before acknowledgement |
+| `messages/v1/dead-letter-metadata.v1.schema.json` | `x-sentinel-dead-letter` header attached to dead-lettered messages |
+| `messaging/topology.v1.json` | Exchanges, queues, bindings, routing keys and retry settings |
+
+Message schemas are versioned in the file name and `schema_version`. Consumers must reject
+unknown versions. The Python worker bundles byte-identical copies, verified by its tests.
+The Java tests verify the declared topology and the published payloads against these
+files.
+
 ## Versioning and compatibility
 
 - The major version is part of the URL path (`/api/v1`) and of the schema directory and

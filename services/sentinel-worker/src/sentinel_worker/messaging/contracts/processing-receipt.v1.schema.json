@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/messages/v1/processing-receipt.v1.schema.json",
+  "title": "Worker processing receipt v1",
+  "description": "Durable record committed by a worker before it acknowledges a scan.requested message. event_id is unique in the receipt store and is the deduplication key across redeliveries and worker restarts. message_sha256 detects a different message reusing an event_id (possible tampering). In this phase the receipt only records acceptance; no scanner is executed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "event_schema_version",
+    "scan_id",
+    "project_id",
+    "organization_id",
+    "commit_sha",
+    "correlation_id",
+    "occurred_at",
+    "message_sha256",
+    "outcome",
+    "received_at",
+    "worker_id",
+    "worker_version"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "event_id": { "$ref": "#/$defs/uuid" },
+    "event_type": { "const": "scan.requested" },
+    "event_schema_version": { "const": 1 },
+    "scan_id": { "$ref": "#/$defs/uuid" },
+    "project_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "commit_sha": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
+    "correlation_id": { "$ref": "#/$defs/uuid" },
+    "occurred_at": {
+      "description": "occurred_at of the received event.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "message_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "outcome": {
+      "description": "ACCEPTED: validated and recorded; scanner execution is not implemented yet.",
+      "type": "string",
+      "enum": ["ACCEPTED"]
+    },
+    "received_at": { "type": "string", "format": "date-time" },
+    "worker_id": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[A-Za-z0-9._:-]+$" },
+    "worker_version": { "type": "string", "minLength": 1, "maxLength": 50 }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  }
+}

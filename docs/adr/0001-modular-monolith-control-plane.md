@@ -41,6 +41,7 @@ Module rules (package `dev.sentinelpipe.api`):
 | `security` | HTTP security, JWT validation, exposure guard (ADR-0002, ADR-0003) |
 | `identity` | User identities keyed by token issuer and subject (M2 Phase 2A) |
 | `authorization` | Organization memberships, roles, access control (M2 Phase 2A) |
+| `messaging` | Transactional outbox, publisher, RabbitMQ topology (M2 Phase 2B, ADR-0004) |
 
 - Aggregates reference each other **by identifier**, not by JPA associations. This keeps
   transactions small, avoids lazy-loading across modules, and keeps a later extraction
@@ -49,7 +50,7 @@ Module rules (package `dev.sentinelpipe.api`):
   (exception: `scan` reads `ScanJobRepository`, because the scan lifecycle owns its jobs).
   Repositories, DTOs and controllers are package-private where possible.
 - The dependency direction is acyclic: `project → organization`, `scan → project`,
-  `scan → scanjob`, `authorization → identity, security`, and the domain controllers →
+  `scan → scanjob`, `scan → messaging`, `authorization → identity, security`, and the domain controllers →
   `authorization`. Nothing depends on `scan`; `authorization` does not depend on
   `organization` (it locks organization rows with a native query).
 - Domain invariants live in entities (state machines, normalization) and are mirrored

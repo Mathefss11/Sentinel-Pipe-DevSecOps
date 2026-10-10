@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/messages/v1/scan-requested.v1.schema.json",
+  "title": "scan.requested v1",
+  "description": "Published by the control plane (via the transactional outbox) after an authenticated, authorized scan request was committed. Untrusted input for consumers: it is not an authorization credential and carries no tokens, secrets or personal data. Delivery is at-least-once; consumers must deduplicate by event_id. Self-contained (no $ref) so every consumer can validate it without a schema registry.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "schema_version",
+    "occurred_at",
+    "correlation_id",
+    "scan_id",
+    "project_id",
+    "organization_id",
+    "commit_sha",
+    "branch",
+    "trigger_type",
+    "repository"
+  ],
+  "properties": {
+    "event_id": {
+      "description": "Unique event identifier; also the AMQP message-id. Deduplication key.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "event_type": { "const": "scan.requested" },
+    "schema_version": { "const": 1 },
+    "occurred_at": {
+      "description": "UTC time the event was created, in the same transaction as the scan.",
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 40
+    },
+    "correlation_id": {
+      "description": "Server-generated identifier tying logs of the API request, publisher and worker together.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "scan_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "organization_id": {
+      "description": "Owning organization, derived server-side from the project (never from client input).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?![-/.])(?!refs/)(?!HEAD$)(?!.*\\.\\.)(?!.*//)(?!.*/\\.)(?!.*\\.lock(/|$))(?!.*[/.]$)[A-Za-z0-9._/-]+$"
+    },
+    "trigger_type": {
+      "type": "string",
+      "enum": ["MANUAL", "PUSH", "PULL_REQUEST", "SCHEDULED"]
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "owner", "name"],
+      "properties": {
+        "provider": { "const": "GITHUB" },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 39,
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^(?!\\.{1,2}$)(?!.*\\.git$)[a-z0-9._-]+$"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "2f1c3d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+      "event_type": "scan.requested",
+      "schema_version": 1,
+      "occurred_at": "2026-10-09T12:02:00.500000Z",
+      "correlation_id": "7b9d1f3a-5c7e-4a9b-8d1f-3a5c7e9b1d3f",
+      "scan_id": "9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d",
+      "project_id": "6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f",
+      "organization_id": "0b8f6a0e-6f2b-4d55-9a8b-2c0c4b3f1d10",
+      "commit_sha": "4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e",
+      "branch": "feature/login",
+      "trigger_type": "PULL_REQUEST",
+      "repository": { "provider": "GITHUB", "owner": "acme-corp", "name": "payments-service" }
+    }
+  ]
+}

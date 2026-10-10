@@ -36,7 +36,9 @@ import tools.jackson.databind.json.JsonMapper;
  */
 @SpringBootTest(properties = { "sentinel.domain-api.enabled=true", "server.address=127.0.0.1",
 		"sentinel.security.jwt.issuer=" + TestJwts.ISSUER, "sentinel.security.jwt.audience=" + TestJwts.AUDIENCE,
-		"sentinel.security.platform-admin-subjects=" + TestJwts.PLATFORM_ADMIN })
+		"sentinel.security.platform-admin-subjects=" + TestJwts.PLATFORM_ADMIN,
+		// Outbox publication is driven explicitly by tests for deterministic results.
+		"sentinel.messaging.outbox.publisher-enabled=false" })
 @Import(TestcontainersConfiguration.class)
 public abstract class AbstractDomainApiIntegrationTest {
 

@@ -25,6 +25,14 @@ spring:
     username: ${SENTINEL_RABBITMQ_USERNAME:sentinel}
     password: ${SENTINEL_RABBITMQ_PASSWORD}
     virtual-host: ${SENTINEL_RABBITMQ_VHOST:/}
+    # Outbox publication: an event is marked PUBLISHED only after a positive,
+    # correlated publisher confirm for a message that was not returned as
+    # unroutable (mandatory flag). See OutboxPublisher and ADR-0004.
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    connection-timeout: 5s
+    template:
+      mandatory: true
   mvc:
     problemdetails:
       # Framework-level errors are rendered as RFC 9457 Problem Details.
@@ -62,6 +70,18 @@ sentinel:
   #                                           to create organizations (bootstrap)
   # No shared secrets are supported: tokens must be signed with the provider's
   # asymmetric keys. See ADR-0003.
+  # Transactional outbox and RabbitMQ topology (M2 Phase 2B, ADR-0004).
+  messaging:
+    declare-topology: true
+    outbox:
+      publisher-enabled: true
+      poll-interval-ms: 1000
+      batch-size: 50
+      lease-duration: 60s
+      max-attempts: 8
+      backoff-initial: 2s
+      backoff-max: 5m
+      confirm-timeout: 10s
   security:
     jwt:
       jws-algorithms: RS256

@@ -146,7 +146,46 @@
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<!-- Cross-service end-to-end tests need the Python worker; see the e2e profile. -->
+					<excludes>
+						<exclude>**/*E2ETests.java</exclude>
+					</excludes>
+				</configuration>
+			</plugin>
 		</plugins>
 	</build>
+
+	<profiles>
+		<!--
+			End-to-end tests across the Java control plane and the Python worker:
+			./mvnw verify -Pe2e -Dsentinel.e2e.python=<python with sentinel-worker installed>
+			The tests fail (never skip) when the interpreter is not configured.
+		-->
+		<profile>
+			<id>e2e</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<configuration>
+							<excludes combine.self="override"/>
+							<includes>
+								<include>**/*E2ETests.java</include>
+							</includes>
+							<failIfNoTests>true</failIfNoTests>
+							<systemPropertyVariables>
+								<sentinel.e2e.python>${sentinel.e2e.python}</sentinel.e2e.python>
+							</systemPropertyVariables>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>

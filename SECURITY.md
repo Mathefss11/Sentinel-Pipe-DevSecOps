@@ -2,7 +2,7 @@
 
 ## Project status
 
-SentinelPipe is pre-release software under active development (Milestone 2, Phase 2A: identity and tenant authorization).
+SentinelPipe is pre-release software under active development (Milestone 2, Phase 2B: transactional outbox and reliable messaging).
 It is not yet intended for production use, and no version is currently supported for
 production deployments. Security fixes are applied to the `main` branch.
 
@@ -80,6 +80,16 @@ The current version implements the following controls:
 - **Fail-closed scan state:** failed or cancelled scans are always `INCOMPLETE`, and `PASS`
   requires every scanner job to have completed. These invariants are enforced in code and
   by PostgreSQL CHECK constraints.
+- **Messaging:** scan requests reach the worker through a transactional outbox and RabbitMQ
+  (ADR-0004). Events are built from committed server-side state and contain no tokens,
+  credentials or user identities. The worker treats messages as untrusted input: bounded
+  size, strict JSON, schema and AMQP property validation. A durable receipt is committed
+  before acknowledgement; a reused `event_id` with different content is dead-lettered as
+  possible tampering and never overwrites the original receipt. Messages are never
+  authorization credentials. The worker connects with its own broker user that can only
+  read its queue and write to the retry and dead-letter exchanges. Failed publications and
+  dead letters are retained for recovery (docs/runbooks/messaging.md); nothing is silently
+  dropped. Logs and metrics contain identifiers and outcome codes only, never payloads.
 - **Database:** the schema is managed exclusively by versioned Flyway migrations. Hibernate
   only validates the schema.
 - **CI:** GitHub Actions runs with a read-only token (`contents: read`). Checkout credentials
@@ -93,6 +103,9 @@ The current version implements the following controls:
   deployment are still missing. It remains disabled by default and loopback-only.
 - Access tokens stay valid until they expire (no revocation or introspection). Membership
   revocation takes effect on the next request. Only one trusted issuer is supported.
+- Queue messages are not signed; their integrity depends on broker access control. The API
+  still uses the Compose administrative broker user. Worker deduplication is per host
+  until a shared receipt store exists. Delivery is at-least-once, not exactly-once.
 - Scan `triggerType` and `branch` are caller-supplied and not yet verified against GitHub
   events or OIDC claims. Idempotency keys do not expire, and there is no rate limiting.
 - The Compose stack is for local development only. It does not use TLS between services, and

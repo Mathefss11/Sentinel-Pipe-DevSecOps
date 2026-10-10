@@ -33,6 +33,12 @@ public final class ContractSchemas {
 
 	public static final String SCHEMA_ID_PREFIX = "https://sentinelpipe.dev/schemas/v1/";
 
+	public static final Path MESSAGE_SCHEMAS_DIR = CONTRACTS_DIR.resolve("messages").resolve("v1");
+
+	public static final String MESSAGE_SCHEMA_ID_PREFIX = "https://sentinelpipe.dev/schemas/messages/v1/";
+
+	public static final Path TOPOLOGY_FILE = CONTRACTS_DIR.resolve("messaging").resolve("topology.v1.json");
+
 	private static final SchemaRegistry REGISTRY = SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_2020_12,
 			(builder) -> builder.schemas(ContractSchemas::loadLocal));
 
@@ -43,8 +49,35 @@ public final class ContractSchemas {
 		return REGISTRY.getSchema(SchemaLocation.of(SCHEMA_ID_PREFIX + fileName));
 	}
 
+	public static Schema messageSchema(String fileName) {
+		return REGISTRY.getSchema(SchemaLocation.of(MESSAGE_SCHEMA_ID_PREFIX + fileName));
+	}
+
+	public static List<String> validateMessage(String schemaFileName, JsonNode document) {
+		return messageSchema(schemaFileName)
+			.validate(document,
+					(context) -> context.executionConfig((config) -> config.formatAssertionsEnabled(true)))
+			.stream()
+			.map(Error::toString)
+			.toList();
+	}
+
+	public static void assertValidMessage(String schemaFileName, JsonNode document) {
+		assertThat(validateMessage(schemaFileName, document))
+			.as("%s must validate against %s", document, schemaFileName)
+			.isEmpty();
+	}
+
+	public static List<String> messageSchemaFileNames() {
+		return listSchemas(MESSAGE_SCHEMAS_DIR);
+	}
+
 	public static List<String> schemaFileNames() {
-		try (Stream<Path> files = Files.list(SCHEMAS_DIR)) {
+		return listSchemas(SCHEMAS_DIR);
+	}
+
+	private static List<String> listSchemas(Path directory) {
+		try (Stream<Path> files = Files.list(directory)) {
 			return files.map((file) -> file.getFileName().toString())
 				.filter((name) -> name.endsWith(".schema.json"))
 				.sorted()
@@ -68,12 +101,21 @@ public final class ContractSchemas {
 	}
 
 	private static String loadLocal(String iri) {
-		if (!iri.startsWith(SCHEMA_ID_PREFIX)) {
+		Path directory;
+		String fileName;
+		if (iri.startsWith(MESSAGE_SCHEMA_ID_PREFIX)) {
+			directory = MESSAGE_SCHEMAS_DIR;
+			fileName = iri.substring(MESSAGE_SCHEMA_ID_PREFIX.length());
+		}
+		else if (iri.startsWith(SCHEMA_ID_PREFIX)) {
+			directory = SCHEMAS_DIR;
+			fileName = iri.substring(SCHEMA_ID_PREFIX.length());
+		}
+		else {
 			return null;
 		}
-		String fileName = iri.substring(SCHEMA_ID_PREFIX.length());
-		Path file = SCHEMAS_DIR.resolve(fileName).normalize();
-		if (!file.startsWith(SCHEMAS_DIR) || !Files.isRegularFile(file)) {
+		Path file = directory.resolve(fileName).normalize();
+		if (!file.startsWith(directory) || !Files.isRegularFile(file)) {
 			return null;
 		}
 		try {

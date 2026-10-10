@@ -29,6 +29,15 @@ build/
 *.iml
 .vscode/
 
+# Test diagnostics written on broker startup failures (may contain container logs)
+.test-diagnostics/
+
+# Worker runtime state (durable processing receipts)
+.sentinel-worker/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
 # Downloaded CI log archives and local logs/temporary files
 logs_*.zip
 *.log

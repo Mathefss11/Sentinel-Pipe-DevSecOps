@@ -1,0 +1,70 @@
+{
+  "description": "SentinelPipe RabbitMQ topology, version 1. Single source of truth: the control plane declares exactly these objects and the tests of both services verify them against this file. Transient worker failures are retried through the retry queue (fixed delay = its message TTL), which dead-letters back to the work queue; the worker counts retries in the retry header and dead-letters after max_retries. The work queue's delivery limit is a backstop for consumer crash loops (RabbitMQ 4 does not count explicit requeues).",
+  "version": 1,
+  "exchanges": [
+    { "name": "sentinel.scan-requests", "type": "direct", "durable": true, "auto_delete": false },
+    { "name": "sentinel.scan-requests.dlx", "type": "fanout", "durable": true, "auto_delete": false },
+    { "name": "sentinel.scan-requests.retry", "type": "fanout", "durable": true, "auto_delete": false }
+  ],
+  "queues": [
+    {
+      "name": "sentinel.scan-requests.worker",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "arguments": {
+        "x-queue-type": "quorum",
+        "x-delivery-limit": 5,
+        "x-dead-letter-exchange": "sentinel.scan-requests.dlx",
+        "x-dead-letter-strategy": "at-least-once",
+        "x-overflow": "reject-publish",
+        "x-max-length": 100000
+      }
+    },
+    {
+      "name": "sentinel.scan-requests.dead-letter",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "arguments": {
+        "x-queue-type": "quorum"
+      }
+    },
+    {
+      "name": "sentinel.scan-requests.retry",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "arguments": {
+        "x-queue-type": "quorum",
+        "x-message-ttl": 15000,
+        "x-dead-letter-exchange": "sentinel.scan-requests",
+        "x-dead-letter-routing-key": "scan.requested.v1",
+        "x-dead-letter-strategy": "at-least-once",
+        "x-overflow": "reject-publish",
+        "x-max-length": 100000
+      }
+    }
+  ],
+  "bindings": [
+    { "exchange": "sentinel.scan-requests", "queue": "sentinel.scan-requests.worker", "routing_key": "scan.requested.v1" },
+    { "exchange": "sentinel.scan-requests.dlx", "queue": "sentinel.scan-requests.dead-letter", "routing_key": "" },
+    { "exchange": "sentinel.scan-requests.retry", "queue": "sentinel.scan-requests.retry", "routing_key": "" }
+  ],
+  "messages": {
+    "scan.requested": {
+      "schema_version": 1,
+      "exchange": "sentinel.scan-requests",
+      "routing_key": "scan.requested.v1",
+      "schema": "../messages/v1/scan-requested.v1.schema.json"
+    }
+  },
+  "retry": {
+    "exchange": "sentinel.scan-requests.retry",
+    "max_retries": 5,
+    "count_header": "x-sentinel-retry-count"
+  },
+  "headers": {
+    "dead_letter_metadata": "x-sentinel-dead-letter"
+  }
+}

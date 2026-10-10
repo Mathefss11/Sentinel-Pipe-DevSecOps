@@ -7,13 +7,14 @@ against versioned security policies, and publish actionable remediation reports 
 It is also a cybersecurity engineering portfolio project. The emphasis is on secure design,
 verifiable behavior, and honest reporting of coverage and limitations.
 
-> **Status: Milestone 2, Phase 2A (Identity & tenant authorization).** The control plane
-> registers organizations and GitHub-hosted projects, accepts scan requests for specific
-> commits, and tracks scan and scanner-job lifecycles in PostgreSQL. Every API request is
-> authenticated with OIDC access tokens (JWT) and authorized against server-side
-> organization memberships. **Scanning, policy evaluation and GitHub integration are not
-> implemented yet**, and the domain API is still restricted to loopback, development-stage
-> use (see [Security limitations](#current-security-limitations)).
+> **Status: Milestone 2, Phase 2B (Transactional outbox & reliable messaging).** The
+> control plane registers organizations and GitHub-hosted projects, accepts authenticated
+> and authorized scan requests for specific commits, and delivers them reliably to the
+> Python worker through a transactional outbox and RabbitMQ. The worker validates each
+> request and records a durable receipt. **No scanner is executed yet**, and policy
+> evaluation and GitHub integration are not implemented. The domain API is still
+> restricted to loopback, development-stage use (see
+> [Security limitations](#current-security-limitations)).
 
 ## Architecture overview
 
@@ -99,8 +100,10 @@ QUEUED ──▶ RUNNING ──▶ COMPLETED   (decision: PASS | FAIL | INCOMPLE
 ├── compose.yaml                    # Local PostgreSQL, RabbitMQ and OPA (loopback only)
 ├── .env.example                    # Development-only placeholder configuration
 ├── infrastructure/docker/opa/      # OPA server authorization policy and its tests
-├── packages/contracts/             # OpenAPI 3.1 and JSON Schema 2020-12 contracts
+├── packages/contracts/             # OpenAPI 3.1, JSON Schemas, message contracts, broker topology
 ├── docs/adr/                       # Architecture decision records
+├── docs/architecture/              # Architecture notes (asynchronous messaging)
+├── docs/runbooks/                  # Operational runbooks (outbox, dead letters)
 ├── services/
 │   ├── sentinel-api/               # Spring Boot control plane (Maven Wrapper)
 │   └── sentinel-worker/            # Python worker package
@@ -337,6 +340,56 @@ py -m venv .venv
 validates the Python runtime and the worker configuration (`SENTINEL_WORKER_*` variables).
 It does not connect to external services.
 
+To consume scan requests, create the worker's own least-privileged broker user first
+([runbook §2](docs/runbooks/messaging.md#2-provisioning-least-privilege-broker-users-local)),
+load `.env` into the session (as for the API), then:
+
+```powershell
+.\.venv\Scripts\sentinel-worker.exe consume --idle-timeout 30
+```
+
+| Variable | Purpose |
+|---|---|
+| `SENTINEL_WORKER_RABBITMQ_HOST` / `_PORT` / `_VHOST` | Broker address (defaults `localhost`, `5672`, `/`) |
+| `SENTINEL_WORKER_RABBITMQ_USERNAME` / `_PASSWORD` | The worker's own broker user (required; never logged) |
+| `SENTINEL_WORKER_RECEIPT_DB` | Durable receipt store (default `.sentinel-worker/receipts.sqlite3`) |
+| `SENTINEL_WORKER_PREFETCH` | Unacknowledged messages in flight, 1–50 (default 1) |
+
+## Asynchronous scan delivery
+
+```text
+POST /scans ─► [ scans + outbox_events ] one transaction ─► OutboxPublisher (confirms)
+  ─► RabbitMQ sentinel.scan-requests ─► sentinel-worker: validate ─► commit receipt ─► ack
+```
+
+- **Transactional outbox.** A scan and its `scan.requested` v1 event are committed
+  together; the request never talks to the broker. Idempotent replays create no event
+  (also enforced by `UNIQUE(aggregate_id, event_type)`).
+- **Publisher.** Claims events with `FOR UPDATE SKIP LOCKED` and a lease (safe with many
+  instances; abandoned claims are recovered after the lease expires). It publishes
+  persistent, mandatory messages and marks an event `PUBLISHED` only after a positive
+  publisher confirm. Failures retry with exponential backoff (2 s doubling to 5 min, 8
+  attempts) and then become `FAILED`, which is recoverable by an operator.
+- **Worker.** Validates size, encoding, strict JSON, the shared schema and AMQP
+  properties. It commits a durable receipt keyed by `event_id` **before** acknowledging.
+  Duplicates are acknowledged without effect; a reused `event_id` with different content
+  (for example another tenant) is dead-lettered as possible tampering. Invalid messages go
+  to the dead-letter queue with metadata and their original body; transient failures retry
+  through a delayed retry queue (max 5); crash loops are bounded by the quorum queue's
+  delivery limit.
+- **Guarantees.** At-least-once delivery, idempotent processing by `event_id`, **no
+  exactly-once delivery and no ordering guarantee**. Exactly-once would require a
+  distributed transaction spanning PostgreSQL, RabbitMQ and the worker, which RabbitMQ does
+  not support. A crash after the broker confirms a publication but before the outbox row is
+  marked, or after the worker commits a receipt but before it acknowledges, causes a
+  harmless duplicate instead.
+
+Details: [ADR-0004](docs/adr/0004-transactional-outbox-and-at-least-once-messaging.md),
+[architecture](docs/architecture/asynchronous-messaging.md),
+[runbook](docs/runbooks/messaging.md), contracts in
+[`packages/contracts/messages`](packages/contracts/messages/v1) and
+[`packages/contracts/messaging/topology.v1.json`](packages/contracts/messaging/topology.v1.json).
+
 ## Testing
 
 | Scope | Command (from the component directory) | Requires |
@@ -344,7 +397,9 @@ It does not connect to external services.
 | API build, unit, integration and contract tests | `.\mvnw.cmd clean verify` (`services/sentinel-api`, JDK 21) | Docker (Testcontainers) |
 | Worker lint | `.\.venv\Scripts\ruff.exe check .` | — |
 | Worker formatting | `.\.venv\Scripts\ruff.exe format --check .` | — |
-| Worker tests | `.\.venv\Scripts\python.exe -m pytest` | — |
+| Worker unit tests | `.\.venv\Scripts\python.exe -m pytest -m "not integration"` | — |
+| Worker tests incl. RabbitMQ integration | `.\.venv\Scripts\python.exe -m pytest` | Docker (Testcontainers) |
+| End to end: API → outbox → RabbitMQ → real worker | `.\mvnw.cmd verify -Pe2e "-Dsentinel.e2e.python=..\sentinel-worker\.venv\Scripts\python.exe"` (`services/sentinel-api`) | Docker, worker installed |
 | Compose configuration | `docker compose --env-file .env.example config --quiet` (repository root) | Docker |
 | OPA authorization policy | `docker run --rm -v "${PWD}\infrastructure\docker\opa:/policies:ro" openpolicyagent/opa:1.21.1 test /policies -v` | Docker |
 
@@ -356,8 +411,15 @@ a test-only RSA key pair generated in memory at test start; no private key is st
 the repository. The tests verify that:
 
 - the application context starts against real PostgreSQL and RabbitMQ;
-- Flyway applies `V001`–`V003` to a fresh database with valid checksums and no pending
+- Flyway applies `V001`–`V004` to a fresh database with valid checksums and no pending
   migrations. Hibernate only validates the schema and creates no tables;
+- a scan and its outbox event commit or roll back together; replays and concurrent
+  retries create exactly one event; events carry the project's organization;
+- against real RabbitMQ, the publisher sends persistent, confirmed messages; concurrent
+  publishers send each event exactly once; crashed claims are recovered and fenced;
+  broker downtime, broker nacks, unroutable messages and unknown event types never
+  produce `PUBLISHED`; retries are bounded and `FAILED` events are recoverable;
+- the declared topology and the messages match `packages/contracts`;
 - `/actuator/health`, liveness and readiness are `UP` without exposing component details;
 - with the default configuration, no `/api/**` route or token decoder exists and every
   non-health request is denied. The exposure guard rejects non-loopback bindings and
@@ -383,10 +445,14 @@ the repository. The tests verify that:
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on pushes to `main`, on pull requests, and manually. It has
-three jobs:
+four jobs (the worker job runs once per Python version):
 
 - **sentinel-api:** `mvnw clean verify` on JDK 21, including the Testcontainers integration tests.
-- **sentinel-worker:** Ruff lint, Ruff format check and Pytest on Python 3.12 and 3.14.
+- **sentinel-worker:** Ruff lint, Ruff format check and Pytest on Python 3.12 and 3.14,
+  including RabbitMQ integration tests via Testcontainers (pinned image, pre-pulled).
+- **End-to-end:** an authenticated scan request travels through the outbox, publisher
+  confirms and RabbitMQ to the real Python worker, which persists its receipt; the test also
+  covers a publisher crash after the broker confirm (`-Pe2e`).
 - **Infrastructure:** validates `compose.yaml`, checks and tests the OPA authorization policy,
   starts the stack and waits for all health checks, then tears it down.
 
@@ -441,11 +507,25 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 - [x] OpenAPI security scheme, membership endpoints and JSON Schemas
 - [x] ADR-0003 (identity and tenant authorization)
 
+## Milestone 2, Phase 2B checklist
+
+- [x] Flyway `V004__transactional_outbox.sql`; scan and event written atomically
+- [x] Multi-instance publisher with `SKIP LOCKED` leases, crash recovery and fencing
+- [x] Persistent messages, publisher confirms, mandatory routing; bounded retries with backoff
+- [x] Durable quorum-queue topology with retry and dead-letter queues and a delivery limit
+- [x] `scan.requested` v1, processing-receipt and dead-letter metadata contracts (Java + Python)
+- [x] Python consumer: strict validation, durable receipts before ack, duplicate and
+  tampering detection, least-privileged broker user
+- [x] Outbox metrics, structured logs, ADR-0004, architecture notes and runbook
+- [ ] Shared receipt store for multiple worker instances (next phase)
+- [ ] Restricted broker user for the API; metrics endpoint exposure (later phases)
+
 ## Architecture decisions
 
 - [ADR-0001: Modular monolith control plane](docs/adr/0001-modular-monolith-control-plane.md)
 - [ADR-0002: Domain API disabled until authentication exists](docs/adr/0002-domain-api-exposure-before-authentication.md)
 - [ADR-0003: External OIDC identity and membership-based tenant authorization](docs/adr/0003-identity-and-tenant-authorization.md)
+- [ADR-0004: Transactional outbox and at-least-once messaging](docs/adr/0004-transactional-outbox-and-at-least-once-messaging.md)
 
 ## Current security limitations
 
@@ -457,6 +537,11 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   stay valid until they expire; there is no token revocation or introspection.
 - A single trusted token issuer is supported. Machine identities (GitHub App, Actions
   OIDC) arrive in M5.
+- Queue messages are not signed. Their integrity relies on broker access control. The
+  worker uses its own least-privileged broker user; the API still uses the Compose
+  administrative user.
+- The worker's receipt store is local to one host, so deduplication across several worker
+  instances is not yet guaranteed.
 - `triggerType` and `branch` are supplied by the caller and not yet verified against
   GitHub events or Actions OIDC claims.
 - Idempotency keys do not expire, and there is no rate limiting.
@@ -468,7 +553,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 | Milestone | Scope |
 |---|---|
 | M1 — Foundation | Complete |
-| **M2 — Domain & Contracts** | Phases 1 and 2A complete (see checklists); remaining: transactional outbox, idempotency-key expiry |
+| **M2 — Domain & Contracts** | Phases 1, 2A and 2B complete (see checklists); remaining: idempotency-key expiry, shared receipt store |
 | M3 — Scanners | Discovery, Semgrep/Gitleaks/Trivy adapters, normalized findings, correlation |
 | M4 — Security Gate & Remediation | OPA policies, coverage, exceptions, decisions, remediation reports |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |

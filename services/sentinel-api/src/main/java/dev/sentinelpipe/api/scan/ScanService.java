@@ -6,6 +6,7 @@ import dev.sentinelpipe.api.common.GitBranchNames;
 import dev.sentinelpipe.api.common.IdempotencyKeyReuseException;
 import dev.sentinelpipe.api.common.ResourceNotFoundException;
 import dev.sentinelpipe.api.common.Timestamps;
+import dev.sentinelpipe.api.project.Project;
 import dev.sentinelpipe.api.project.ProjectService;
 import dev.sentinelpipe.api.scanjob.ScanJob;
 import dev.sentinelpipe.api.scanjob.ScanJobRepository;
@@ -18,6 +19,8 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -52,6 +55,8 @@ public class ScanService {
 
 	private static final Pattern IDEMPOTENCY_KEY = Pattern.compile(IDEMPOTENCY_KEY_REGEX);
 
+	private static final Logger log = LoggerFactory.getLogger(ScanService.class);
+
 	private static final Sort LIST_ORDER = Sort.by(Sort.Order.desc("requestedAt"), Sort.Order.desc("id"));
 
 	/** Outcome of a scan request; {@code replayed} is true for an idempotent replay. */
@@ -64,6 +69,8 @@ public class ScanService {
 
 	private final ProjectService projectService;
 
+	private final ScanRequestedEvents scanRequestedEvents;
+
 	private final TransactionTemplate writeTransaction;
 
 	private final TransactionTemplate readTransaction;
@@ -71,10 +78,11 @@ public class ScanService {
 	private final Clock clock;
 
 	ScanService(ScanRepository scans, ScanJobRepository scanJobs, ProjectService projectService,
-			PlatformTransactionManager transactionManager, Clock clock) {
+			ScanRequestedEvents scanRequestedEvents, PlatformTransactionManager transactionManager, Clock clock) {
 		this.scans = scans;
 		this.scanJobs = scanJobs;
 		this.projectService = projectService;
+		this.scanRequestedEvents = scanRequestedEvents;
 		this.writeTransaction = new TransactionTemplate(transactionManager);
 		this.readTransaction = new TransactionTemplate(transactionManager);
 		this.readTransaction.setReadOnly(true);
@@ -86,6 +94,10 @@ public class ScanService {
 	 * idempotency key. This method deliberately manages its own transactions: a unique
 	 * constraint violation aborts the PostgreSQL transaction, so the replay lookup must
 	 * run in a new one.
+	 * <p>
+	 * A new scan and its {@code scan.requested} outbox event are written in one
+	 * transaction (transactional outbox); nothing is sent to the broker here. A replay
+	 * returns the existing scan and appends no event.
 	 * @param idempotencyKey optional; {@code null} always creates a new scan
 	 */
 	public ScanRequestOutcome requestScan(UUID projectId, String commitSha, String branch, TriggerType triggerType,
@@ -108,10 +120,14 @@ public class ScanService {
 		String requestFingerprint = fingerprint;
 		try {
 			return this.writeTransaction.execute((status) -> {
-				this.projectService.requireAcceptingScans(projectId);
+				Project project = this.projectService.requireAcceptingScans(projectId);
 				Scan scan = Scan.request(projectId, normalizedSha, validatedBranch, triggerType, idempotencyKey,
 						requestFingerprint, Timestamps.now(this.clock));
 				this.scans.saveAndFlush(scan);
+				UUID correlationId = UUID.randomUUID();
+				this.scanRequestedEvents.append(scan, project, correlationId);
+				log.info("scan.requested scan_id={} project_id={} organization_id={} correlation_id={}", scan.getId(),
+						projectId, project.getOrganizationId(), correlationId);
 				return new ScanRequestOutcome(new ScanDetails(scan, List.of()), false);
 			});
 		}

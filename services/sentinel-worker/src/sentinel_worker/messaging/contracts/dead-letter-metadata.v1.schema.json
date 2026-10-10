@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/messages/v1/dead-letter-metadata.v1.schema.json",
+  "title": "Dead-letter metadata v1",
+  "description": "JSON value of the AMQP header x-sentinel-dead-letter that a worker attaches when it dead-letters a message it permanently cannot process. The original message body is preserved unchanged for inspection and replay. Identifier fields are null when they could not be extracted from an invalid message. Never contains credentials or the message body; detail is a fixed, sanitized description. Messages dead-lettered by the broker itself (delivery limit exceeded) carry only RabbitMQ's x-death headers.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dead_letter_id",
+    "event_id",
+    "scan_id",
+    "project_id",
+    "organization_id",
+    "commit_sha",
+    "correlation_id",
+    "created_at",
+    "failure_code",
+    "detail",
+    "original_message_sha256",
+    "original_size_bytes",
+    "worker_id",
+    "worker_version"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "dead_letter_id": { "$ref": "#/$defs/uuid" },
+    "event_id": { "$ref": "#/$defs/nullableUuid" },
+    "scan_id": { "$ref": "#/$defs/nullableUuid" },
+    "project_id": { "$ref": "#/$defs/nullableUuid" },
+    "organization_id": { "$ref": "#/$defs/nullableUuid" },
+    "commit_sha": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    },
+    "correlation_id": { "$ref": "#/$defs/nullableUuid" },
+    "created_at": {
+      "description": "UTC time the worker dead-lettered the message.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "failure_code": {
+      "type": "string",
+      "enum": [
+        "MESSAGE_TOO_LARGE",
+        "INVALID_ENCODING",
+        "INVALID_JSON",
+        "SCHEMA_VIOLATION",
+        "PROPERTIES_MISMATCH",
+        "EVENT_ID_CONFLICT",
+        "TRANSIENT_RETRIES_EXHAUSTED"
+      ]
+    },
+    "detail": { "type": "string", "maxLength": 300 },
+    "original_message_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "original_size_bytes": { "type": "integer", "minimum": 0 },
+    "worker_id": { "type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[A-Za-z0-9._:-]+$" },
+    "worker_version": { "type": "string", "minLength": 1, "maxLength": 50 }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "nullableUuid": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  }
+}
