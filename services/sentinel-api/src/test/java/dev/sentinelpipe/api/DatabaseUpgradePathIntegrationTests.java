@@ -68,9 +68,10 @@ class DatabaseUpgradePathIntegrationTests {
 		MigrateResult result = migrator().migrate();
 
 		assertThat(result.success).isTrue();
-		assertThat(result.migrationsExecuted).isEqualTo(3);
+		// V006, V007, V008 and V009.
+		assertThat(result.migrationsExecuted).isEqualTo(4);
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
-				+ " WHERE n.nspname IN ('public', 'worker', 'ops', 'lifecycle', 'evidence')"
+				+ " WHERE n.nspname IN ('public', 'worker', 'ops', 'lifecycle', 'evidence', 'policy')"
 				+ " AND c.relowner <> 'sentinel_owner'::regrole",
 				Long.class))
 			.isZero();
@@ -162,7 +163,8 @@ class DatabaseUpgradePathIntegrationTests {
 				reported.get("job_id"), scanId, reported.get("lease_epoch"), reported.get("lease_token")))
 			.isEqualTo("ACCEPTED");
 
-		assertThat(migrator().migrate().migrationsExecuted).isEqualTo(1);
+		// V008 and V009.
+		assertThat(migrator().migrate().migrationsExecuted).isEqualTo(2);
 
 		// The legacy report is kept as it was; report_job no longer exists.
 		assertThat(jdbc.queryForMap("SELECT outcome, result FROM lifecycle.job_reports WHERE job_id = ?",
@@ -213,7 +215,7 @@ class DatabaseUpgradePathIntegrationTests {
 	void freshInstallationMigratesEntirelyAsTheOwner() {
 		DatabaseRoles.provision(this.postgres);
 
-		assertThat(migrator().migrate().migrationsExecuted).isEqualTo(8);
+		assertThat(migrator().migrate().migrationsExecuted).isEqualTo(9);
 		assertThat(this.admin.jdbc()
 			.queryForObject("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'flyway_schema_history'::regclass",
 					String.class))

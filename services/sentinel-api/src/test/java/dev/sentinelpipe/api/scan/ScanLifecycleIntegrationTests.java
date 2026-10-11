@@ -102,24 +102,39 @@ class ScanLifecycleIntegrationTests extends AbstractDomainApiIntegrationTest {
 		assertThat(this.lifecycle.evaluate(this.scanId)).isFalse();
 	}
 
+	/**
+	 * M4 (ADR-0013): PASS and FAIL exist only with a recorded policy evaluation. Even with
+	 * every job COMPLETED, neither the service nor the database function records them
+	 * directly; INCOMPLETE without a policy remains possible.
+	 */
 	@Test
-	void completesWithPassOnlyWhenEveryJobCompletedAndAPolicyWasEvaluated() {
+	void passAndFailCannotBeRecordedWithoutAnEvaluationRecord() {
 		runFixtureToCompletion();
 
-		assertThatThrownBy(() -> this.lifecycle.completeEvaluation(this.scanId, SecurityDecision.PASS,
-				DecisionReason.POLICY_EVALUATION_UNAVAILABLE))
-			.isInstanceOf(DomainRuleViolationException.class);
-		this.lifecycle.completeEvaluation(this.scanId, SecurityDecision.PASS, DecisionReason.POLICY_EVALUATED);
+		for (SecurityDecision decision : List.of(SecurityDecision.PASS, SecurityDecision.FAIL)) {
+			for (DecisionReason reason : DecisionReason.values()) {
+				assertThatThrownBy(() -> this.lifecycle.completeEvaluation(this.scanId, decision, reason))
+					.isInstanceOf(DomainRuleViolationException.class);
+			}
+			assertThatThrownBy(() -> this.jdbcTemplate.queryForObject(
+					"SELECT lifecycle.complete_evaluation(?, ?, 'POLICY_EVALUATED')", String.class, this.scanId,
+					decision.name()))
+				.hasMessageContaining("invalid evaluation result");
+		}
+		assertThat(scanRow()).containsEntry("execution_status", "EVALUATING")
+			.containsEntry("security_decision", "PENDING");
 
+		this.lifecycle.completeEvaluation(this.scanId, SecurityDecision.INCOMPLETE,
+				DecisionReason.POLICY_EVALUATION_UNAVAILABLE);
 		assertThat(scanRow()).containsEntry("execution_status", "COMPLETED")
-			.containsEntry("security_decision", "PASS")
-			.containsEntry("decision_reason", "POLICY_EVALUATED");
+			.containsEntry("security_decision", "INCOMPLETE")
+			.containsEntry("decision_reason", "POLICY_EVALUATION_UNAVAILABLE");
 		assertThat(this.scanService.get(this.scanId).jobs()).extracting(ScanJob::getExecutionStatus)
 			.containsOnly(ScanJobStatus.COMPLETED);
 	}
 
 	@Test
-	void passIsRejectedWhenAJobFailedButFailAndIncompleteAreAllowed() {
+	void aScanWithAFailedJobIsIncompleteAndNeverPass() {
 		this.lifecycle.planJob(this.scanId, ScannerType.FIXTURE);
 		Lease lease = this.worker.claimFixtureOrFail(this.scanId);
 		assertThat(this.worker.fail(lease, "UNSUPPORTED_SCANNER")).isEqualTo("ACCEPTED");
@@ -132,9 +147,10 @@ class ScanLifecycleIntegrationTests extends AbstractDomainApiIntegrationTest {
 		assertThat(scanRow()).containsEntry("execution_status", "EVALUATING")
 			.containsEntry("security_decision", "PENDING");
 
-		this.lifecycle.completeEvaluation(this.scanId, SecurityDecision.FAIL, DecisionReason.POLICY_EVALUATED);
+		this.lifecycle.completeEvaluation(this.scanId, SecurityDecision.INCOMPLETE,
+				DecisionReason.SCANNER_EXECUTION_INCOMPLETE);
 		assertThat(scanRow()).containsEntry("execution_status", "COMPLETED")
-			.containsEntry("security_decision", "FAIL");
+			.containsEntry("security_decision", "INCOMPLETE");
 	}
 
 	@Test
@@ -218,11 +234,12 @@ class ScanLifecycleIntegrationTests extends AbstractDomainApiIntegrationTest {
 	@Test
 	void terminalScansCannotBeModified() {
 		Lease lease = runFixtureToCompletion();
-		this.lifecycle.completeEvaluation(this.scanId, SecurityDecision.FAIL, DecisionReason.POLICY_EVALUATED);
+		assertThat(this.lifecycle.evaluate(this.scanId)).isTrue();
 
-		assertThatThrownBy(() -> this.lifecycle.completeEvaluation(this.scanId, SecurityDecision.PASS,
-				DecisionReason.POLICY_EVALUATED))
+		assertThatThrownBy(() -> this.lifecycle.completeEvaluation(this.scanId, SecurityDecision.INCOMPLETE,
+				DecisionReason.SCANNER_EXECUTION_INCOMPLETE))
 			.isInstanceOf(DomainRuleViolationException.class);
+		assertThat(this.lifecycle.evaluate(this.scanId)).isFalse();
 		assertThatThrownBy(() -> this.lifecycle.cancelScan(this.scanId, "user:test"))
 			.isInstanceOf(ConflictException.class);
 		assertThatThrownBy(() -> this.lifecycle.failScan(this.scanId)).isInstanceOf(DomainRuleViolationException.class);
@@ -231,7 +248,8 @@ class ScanLifecycleIntegrationTests extends AbstractDomainApiIntegrationTest {
 		assertThat(this.worker.complete(lease)).isEqualTo("DUPLICATE");
 		assertThat(this.worker.fail(lease, "SCANNER_ERROR")).isEqualTo("CONFLICT");
 		assertThat(scanRow()).containsEntry("execution_status", "COMPLETED")
-			.containsEntry("security_decision", "FAIL");
+			.containsEntry("security_decision", "INCOMPLETE")
+			.containsEntry("decision_reason", "POLICY_EVALUATION_UNAVAILABLE");
 	}
 
 	@Test

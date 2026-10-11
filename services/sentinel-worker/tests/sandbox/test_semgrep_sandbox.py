@@ -289,7 +289,7 @@ def test_oversized_output_and_reports_fail_explicitly(cli: DockerCli, tmp_path: 
     argv = ADAPTER.command(snapshot)
 
     small_report = sandbox(cli).run(
-        [*argv[:5], "1024", argv[6]], threading.Event(), stdin=ADAPTER.stdin(snapshot)
+        [*argv[:5], "1024", *argv[6:]], threading.Event(), stdin=ADAPTER.stdin(snapshot)
     )
     small_stdout = execute(cli, tmp_path, "many", max_stdout_bytes=4096)
 
@@ -341,6 +341,22 @@ def test_hostile_archives_never_yield_a_scan(cli: DockerCli, members: list[Any],
 
 
 # --- Isolation, cancellation and cleanup ---------------------------------------------
+
+
+def test_an_altered_ruleset_never_runs(cli: DockerCli) -> None:
+    """The ruleset in the input archive is checked against its pinned digest before Semgrep
+    starts. A ruleset with one rule removed would otherwise run and under-report."""
+    rules = json.loads(RULESET)
+    rules["rules"] = rules["rules"][1:]
+    altered = json.dumps(rules).encode()
+    snapshot = RepositorySnapshot(files=(SnapshotFile("a.py", b"eval(input())\n"),), skipped={})
+
+    for config in (altered, RULESET[:-1], RULESET + b" "):
+        stdin = snapshot.archive("repo", {"config/rules.json": config})
+        run = sandbox(cli).run(ADAPTER.command(snapshot), threading.Event(), stdin=stdin)
+        assert run.exit_code == 72
+        with pytest.raises(ScannerError):
+            ADAPTER.interpret(run, snapshot, lease("altered-ruleset", "SEMGREP"))
 
 
 def test_every_isolation_control_holds_under_the_semgrep_policy(cli: DockerCli) -> None:

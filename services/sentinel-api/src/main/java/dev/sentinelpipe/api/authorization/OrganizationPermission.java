@@ -11,7 +11,11 @@ public enum OrganizationPermission {
 
 	VIEW_PROJECTS(OrganizationRole.VIEWER),
 
+	/** Scans, including their policy evaluation records. */
 	VIEW_SCANS(OrganizationRole.VIEWER),
+
+	/** Policy versions and the policy active for a project. */
+	VIEW_POLICIES(OrganizationRole.VIEWER),
 
 	REQUEST_SCAN(OrganizationRole.MEMBER),
 
@@ -21,7 +25,16 @@ public enum OrganizationPermission {
 
 	VIEW_MEMBERS(OrganizationRole.ADMIN),
 
-	MANAGE_MEMBERS(OrganizationRole.ADMIN);
+	MANAGE_MEMBERS(OrganizationRole.ADMIN),
+
+	/** Create new (immutable) policy versions; this does not put them in force. */
+	MANAGE_POLICIES(OrganizationRole.ADMIN),
+
+	/**
+	 * Put a policy version in force for a project. Owner-only: activation can weaken the
+	 * security gate, so drafting (ADMIN) and activation are separate permissions.
+	 */
+	ACTIVATE_POLICY(OrganizationRole.OWNER);
 
 	private final OrganizationRole minimumRole;
 

@@ -1,10 +1,11 @@
 # ADR-0011: Semgrep SAST with a bundled, reviewed ruleset
 
-- **Status:** Proposed (pending owner review)
+- **Status:** Accepted with conditions (2026-10-11; see [Acceptance](#acceptance)).
+  Previously Proposed.
 - **Date:** 2026-10-11
 - **Milestone:** M3 Phase 2 (Slice 2: Semgrep)
 - **Builds on:** [ADR-0010](0010-scanner-adapters-repository-snapshots-and-findings.md)
-  (scanner adapters, snapshots, `findings.v1`; itself still **Proposed**)
+  (scanner adapters, snapshots, `findings.v1`; accepted with conditions on 2026-10-11)
 - **Threat model:** [Semgrep scanner](../threat-model/semgrep-scanner.md)
 - **Security review:** [Slice 2 review](../security/m3-phase2-slice2-security-review.md)
   (defects S2-1 to S2-7 fixed; this ADR reflects the fixed design)
@@ -63,6 +64,11 @@ The trust model is unchanged (ADR-0009):
     with the standard library and no new dependency.
   - It is pinned by SHA-256 (`RULESET_SHA256`, currently `d52217f6…01516a1f`, after the
     security review's rule fixes).
+  - It is checked again **inside the sandbox** before Semgrep starts: the worker passes
+    `RULESET_SHA256` as a positional argument and the script compares it with the
+    `sha256sum` of `config/rules.json` (exit 72, `INPUT_VERIFICATION_FAILED`). Added at
+    acceptance (see below); before, worker configuration in the input archive was not
+    covered by the shared `repo/` digest.
   - It is validated structurally when the worker starts; any violation fails closed at
     startup. The validation allows only:
     - keys and pattern operators from an allowlist. This excludes `pattern-where-python`
@@ -311,3 +317,42 @@ are byte-identical to before:
   verified. The option is also marked experimental in this version.
 - **Bind-mounting the ruleset.** Rejected: the no-mount policy stands. The ruleset
   travels in the same verified archive as the snapshot.
+
+## Acceptance
+
+- **Decision:** Accepted with conditions.
+- **Date:** 2026-10-11.
+- **Decision owner:** the repository owner (recorded on the owner's instruction; no
+  restriction is waived).
+- **Supporting CI:** run #13 on `main`, commit `f0f6a83`, all six jobs green, as reported
+  by the repository owner (see the ADR-0010 acceptance note on what the recorder could
+  verify locally). The ruleset check below was added after that run and is not yet
+  covered by remote CI.
+- **Conditions and accepted residual risks:**
+  - `PARSE_COMPLETENESS_UNVERIFIED`: silent parser recovery in Java, JavaScript and
+    TypeScript cannot be detected;
+  - heuristic-only file-name redaction for Semgrep;
+  - the ruleset licensing decision: rules are authored in this repository; Semgrep
+    registry rules are not used or redistributed;
+  - 13 pattern rules without taint tracking; findings are not proof of exploitability,
+    and a clean result is not a statement of security;
+  - the documented false negatives remain, pinned by
+    `test_documented_false_negatives_are_still_accurate`; the rule proposals are tracked
+    as separate work and are not part of this acceptance;
+  - the image is linux/amd64 only;
+  - synthetic local fixtures only; refused in production by worker and API; runc is not
+    adequate for hostile content.
+- **Integrity follow-up closed at acceptance.** The Slice 3 review recorded that the
+  Semgrep ruleset in the input archive, like Trivy's report template before its fix, was
+  not covered by the shared `repo/` digest. Assessment: the worker builds the archive from
+  the import-verified bytes, so exploiting the gap needs tampering between the worker and
+  the extracted file (the stdin channel or the sandbox itself). The impact would be
+  silent under-reporting (for example a rule removed), so it is a meaningful, if narrow,
+  integrity gap. The fix is small, backward compatible and does not change detection
+  scope: the in-sandbox digest check described in decision 2. Regression tests:
+  `test_the_ruleset_is_verified_inside_the_sandbox_before_semgrep_runs` (unit) and
+  `test_an_altered_ruleset_never_runs` (real container: a removed rule, a truncated file
+  and a whitespace-only change all exit 72).
+- **Follow-up work:** ruleset extensions for the documented false negatives (separate,
+  reviewed change); verified commit snapshots (M5); policy evaluation
+  ([ADR-0013](0013-security-policy-engine.md)).

@@ -6,13 +6,21 @@ package dev.sentinelpipe.api.scan;
  */
 public enum DecisionReason {
 
-	/** A policy evaluation produced the decision (the only reason for PASS or FAIL). */
+	/**
+	 * A policy evaluation produced the decision; its evaluation record explains it
+	 * (ADR-0013). The only reason for PASS or FAIL, and the reason of every decision of a
+	 * COMPLETED scan pinned to a policy, including INCOMPLETE (a pinned scan cancelled or
+	 * failed during execution keeps its own reason).
+	 */
 	POLICY_EVALUATED,
 
-	/** Every job completed, but no policy evaluation is available yet: INCOMPLETE. */
+	/** Every job completed, but the scan has no policy to evaluate it against: INCOMPLETE. */
 	POLICY_EVALUATION_UNAVAILABLE,
 
-	/** At least one job failed or was cancelled, so evidence is missing: INCOMPLETE. */
+	/**
+	 * A scan without a policy had a job fail or be cancelled, so evidence is missing:
+	 * INCOMPLETE.
+	 */
 	SCANNER_EXECUTION_INCOMPLETE,
 
 	/** The scan exceeded its hard execution deadline. */

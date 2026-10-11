@@ -21,8 +21,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * <li>{@code lifecycle.supervise}: fails RUNNING scans past their hard deadline, and
  * reclaims expired job leases (requeue while attempts remain, otherwise FAILED); a scan
  * whose jobs are all terminal moves to EVALUATING;</li>
- * <li>evaluates EVALUATING scans ({@link ScanLifecycleService#evaluate}). Without a
- * policy engine the decision is INCOMPLETE with a recorded reason; never PASS;</li>
+ * <li>evaluates EVALUATING scans ({@link ScanLifecycleService#evaluate}): a scan pinned to
+ * a policy version by the policy engine, with an evaluation record (ADR-0013); a scan
+ * without a policy is INCOMPLETE with a recorded reason, never PASS;</li>
  * <li>purges evidence content past its retention ({@code evidence.purge_expired}); digests
  * and results remain;</li>
  * <li>refreshes low-cardinality gauges (job counts by state, oldest running job, refused

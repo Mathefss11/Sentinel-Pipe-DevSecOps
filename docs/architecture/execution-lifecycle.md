@@ -23,8 +23,9 @@ records: [ADR-0007](../adr/0007-database-authoritative-execution-leases.md),
 ```
 
 - **The API** creates scans and plans jobs. It changes execution state only through
-  `lifecycle.cancel_scan`, `lifecycle.fail_scan`, `lifecycle.supervise` and
-  `lifecycle.complete_evaluation`, and has no UPDATE privilege on lifecycle columns.
+  `lifecycle.cancel_scan`, `lifecycle.fail_scan`, `lifecycle.supervise`,
+  `lifecycle.complete_evaluation` (INCOMPLETE without a policy only, since V009) and
+  `policy.record_evaluation` (ADR-0013), and has no UPDATE privilege on lifecycle columns.
 - **Workers** have no table privileges. Their only interface to execution is
   `worker.claim_job`, `worker.heartbeat_job`, `worker.put_evidence` and
   `worker.submit_result` (plus `worker.record_receipt` for message receipts).
@@ -51,13 +52,15 @@ Job:   QUEUED ──claim──▶ RUNNING ──report COMPLETED──▶ COMPL
 | Scan status | Security decision | `decisionReason` |
 |---|---|---|
 | QUEUED, RUNNING, EVALUATING | PENDING | null |
-| COMPLETED | PASS or FAIL (policy only) | POLICY_EVALUATED |
-| COMPLETED | INCOMPLETE | POLICY_EVALUATION_UNAVAILABLE (all jobs completed; no policy engine yet) or SCANNER_EXECUTION_INCOMPLETE (a job failed or was cancelled) |
+| COMPLETED | PASS, FAIL or INCOMPLETE (scan pinned to a policy; an evaluation record explains it) | POLICY_EVALUATED |
+| COMPLETED | INCOMPLETE (scan without a policy) | POLICY_EVALUATION_UNAVAILABLE (all jobs completed) or SCANNER_EXECUTION_INCOMPLETE (a job failed or was cancelled) |
 | FAILED | INCOMPLETE | EXECUTION_DEADLINE_EXCEEDED or EXECUTION_FAILED |
 | CANCELLED | INCOMPLETE | CANCELLED_BY_USER |
 
-`PASS` requires every job `COMPLETED` **and** a policy evaluation. Neither exists before M4,
-so no scan can currently pass.
+`PASS` requires every job `COMPLETED` **and** a recorded policy evaluation of valid,
+sufficiently complete evidence (M4 Phase 1, [ADR-0013](../adr/0013-security-policy-engine.md),
+[decision semantics](policy-decision-semantics.md)). A scan is pinned to the policy version
+in force for its project when it is requested; without one it can never pass.
 
 ## 3. Worker protocol
 
@@ -177,6 +180,7 @@ Worker (`sentinel-worker execute`):
 - Proof that evidence came from an honest scanner run (attestation, provenance) and an
   S3-compatible evidence backend for large artifacts. See ADR-0008, "Guarantees and their
   limits".
-- Policy evaluation and therefore any PASS or FAIL decision (M4).
+- Re-evaluation, security exceptions and remediation reports (later M4 slices). Policy
+  evaluation itself exists since M4 Phase 1 (ADR-0013).
 - Per-attempt execution time limits inside the sandbox. The scan-level hard deadline is
   enforced.

@@ -5,6 +5,7 @@ import dev.sentinelpipe.api.common.ConstraintViolations;
 import dev.sentinelpipe.api.common.DomainRuleViolationException;
 import dev.sentinelpipe.api.common.ResourceNotFoundException;
 import dev.sentinelpipe.api.common.Timestamps;
+import dev.sentinelpipe.api.policy.PolicyEvaluationService;
 import dev.sentinelpipe.api.scanjob.ScanJob;
 import dev.sentinelpipe.api.scanjob.ScanJobRepository;
 import dev.sentinelpipe.api.scanjob.ScanJobStatus;
@@ -57,14 +58,17 @@ public class ScanLifecycleService {
 
 	private final ExecutionProperties execution;
 
+	private final PolicyEvaluationService policyEvaluations;
+
 	private final Clock clock;
 
 	ScanLifecycleService(ScanRepository scans, ScanJobRepository scanJobs, JdbcTemplate jdbc,
-			ExecutionProperties execution, Clock clock) {
+			ExecutionProperties execution, PolicyEvaluationService policyEvaluations, Clock clock) {
 		this.scans = scans;
 		this.scanJobs = scanJobs;
 		this.jdbc = jdbc;
 		this.execution = execution;
+		this.policyEvaluations = policyEvaluations;
 		this.clock = clock;
 	}
 
@@ -132,10 +136,12 @@ public class ScanLifecycleService {
 	}
 
 	/**
-	 * Records the security decision of an EVALUATING scan. Fail closed: PASS requires every
-	 * job to have COMPLETED, and PASS or FAIL require reason {@code POLICY_EVALUATED}.
-	 * @throws DomainRuleViolationException if the scan is not EVALUATING or the decision is
-	 * not justified
+	 * Records an INCOMPLETE decision for an EVALUATING scan that has no pinned policy.
+	 * PASS and FAIL are never recorded here: since M4 they exist only with an evaluation
+	 * record ({@link PolicyEvaluationService}, {@code policy.record_evaluation}), and the
+	 * database function refuses them too.
+	 * @throws DomainRuleViolationException if the scan is not EVALUATING, has a pinned
+	 * policy, or the decision is not INCOMPLETE with an INCOMPLETE reason
 	 */
 	@Transactional
 	public void completeEvaluation(UUID scanId, SecurityDecision decision, DecisionReason reason) {
@@ -144,28 +150,49 @@ public class ScanLifecycleService {
 		if (!decision.isFinal()) {
 			throw new DomainRuleViolationException("A completed scan requires a final security decision");
 		}
-		if ((decision != SecurityDecision.INCOMPLETE) != (reason == DecisionReason.POLICY_EVALUATED)) {
-			throw new DomainRuleViolationException("PASS and FAIL require a policy evaluation");
+		if (decision != SecurityDecision.INCOMPLETE || reason == DecisionReason.POLICY_EVALUATED) {
+			throw new DomainRuleViolationException("PASS and FAIL require a recorded policy evaluation");
 		}
 		String outcome = call("SELECT lifecycle.complete_evaluation(?, ?, ?)", scanId, decision.name(),
 				reason.name());
 		switch (outcome) {
 			case "COMPLETED" -> log.info("scan.completed scan_id={} decision={} reason={}", scanId, decision, reason);
 			case "NOT_EVALUATING" -> throw new DomainRuleViolationException("The scan is not EVALUATING");
-			case "REJECTED_PASS_NOT_JUSTIFIED" -> throw new DomainRuleViolationException(
-					"PASS requires at least one scan job and every scan job to have COMPLETED");
+			case "POLICY_EVALUATION_REQUIRED" -> throw new DomainRuleViolationException(
+					"A scan with a pinned policy is completed only by its policy evaluation");
 			case "NOT_FOUND" -> throw new ResourceNotFoundException("Scan", scanId);
 			default -> throw unexpected(outcome);
 		}
 	}
 
 	/**
-	 * Evaluates an EVALUATING scan with the evaluation available in this version: no policy
-	 * engine exists yet (M4), so the decision is always INCOMPLETE, never PASS. Returns
-	 * {@code false} if the scan is no longer EVALUATING (evaluated concurrently).
+	 * Evaluates an EVALUATING scan and records its decision. A scan pinned to a policy
+	 * version is evaluated by the policy engine ({@link PolicyEvaluationService}, ADR-0013),
+	 * which records PASS, FAIL or INCOMPLETE with an evaluation record. A scan without a
+	 * policy is INCOMPLETE, never PASS. Returns {@code false} if the scan is not EVALUATING
+	 * or another instance is evaluating it right now (its row is locked).
 	 */
 	@Transactional
 	public boolean evaluate(UUID scanId) {
+		// One evaluator per scan: the row lock is held until the decision is recorded, so
+		// concurrent supervisors and cancellations wait or skip, and nothing can change the
+		// evidence between reading and recording it.
+		List<String> locked = this.jdbc.queryForList(
+				"SELECT execution_status FROM scans WHERE id = ? FOR UPDATE SKIP LOCKED", String.class, scanId);
+		if (locked.isEmpty() || !ScanExecutionStatus.EVALUATING.name().equals(locked.get(0))) {
+			return false;
+		}
+		switch (this.policyEvaluations.evaluate(scanId)) {
+			case RECORDED -> {
+				return true;
+			}
+			case NOT_EVALUATING -> {
+				return false;
+			}
+			case NO_POLICY -> {
+				// Evaluated below: INCOMPLETE without a policy.
+			}
+		}
 		List<ScanJobStatus> statuses = this.scanJobs.findByScanIdOrderByScannerTypeAsc(scanId)
 			.stream()
 			.map(ScanJob::getExecutionStatus)

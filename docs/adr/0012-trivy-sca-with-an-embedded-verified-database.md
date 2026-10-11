@@ -1,11 +1,13 @@
 # ADR-0012: Trivy dependency scanning with an embedded, verified vulnerability database
 
-- **Status:** Proposed (pending owner review)
+- **Status:** Accepted with conditions (2026-10-11; see [Acceptance](#acceptance)).
+  Previously Proposed.
 - **Date:** 2026-10-11
 - **Milestone:** M3 Phase 2 (Slice 3: Trivy SCA)
 - **Builds on:** [ADR-0010](0010-scanner-adapters-repository-snapshots-and-findings.md)
   (scanner adapters, snapshots, `findings.v1`) and
-  [ADR-0011](0011-semgrep-sast-with-a-bundled-ruleset.md). **Both are still Proposed.**
+  [ADR-0011](0011-semgrep-sast-with-a-bundled-ruleset.md), both accepted with conditions on
+  2026-10-11.
 - **Amends:** ADR-0009 (one kind of local, content-verified sandbox image) and ADR-0010
   (`findings.v1` gains dependency findings, compatibly)
 - **Threat model:** [Trivy scanner](../threat-model/trivy-scanner.md)
@@ -427,3 +429,38 @@ disclosed, making coverage incomplete):
   1 MiB artifact limit for medium lockfiles.
 - **Automatic database updater.** Deferred: requires approval (a privileged, networked
   component).
+
+## Acceptance
+
+- **Decision:** Accepted with conditions.
+- **Date:** 2026-10-11.
+- **Decision owner:** the repository owner (recorded on the owner's instruction; no
+  restriction is waived).
+- **Supporting CI:** run #13 on `main`, commit `f0f6a83`, all six jobs green, including
+  the Trivy sandbox and end-to-end steps, as reported by the repository owner. `f0f6a83`
+  fixed the `LOAD_FAILED` error of the preceding run on `7b2c42f` (classic image store:
+  `manifest.json` added to the loaded archive).
+- **Production restrictions:** Trivy stays refused in production by worker and API until
+  stronger isolation and verified commit snapshots exist. No automatic database updater
+  is approved. There is no production authorization of any kind.
+- **Residual risks accepted as documented (security review R1 to R7):**
+  - R1: runc isolation for synthetic fixtures only;
+  - R2: database integrity is established, publisher authenticity is not. Accepted only
+    with image preparation limited to trusted operators, the documented two-person
+    refresh review and mirror corroboration;
+  - R3: the disclosed coverage limits (partial `pom.xml` and `requirements.txt`, npm
+    prerelease semantics, `Pipfile.lock` development entries, empty lockfiles reported as
+    not analyzed, no Java archive or other-ecosystem analysis, about 12,000 packages per
+    report, records deleted inside a present advisory bucket);
+  - R4: advisory data is a point-in-time snapshot of up to 7 days; refresh is manual;
+  - R5: no signature verification of the base image or database (M6);
+  - R6: linux/amd64 only;
+  - R7: the refresh audit log is a local append-only file, not tamper-evident.
+- **Manual refresh procedure adopted** as documented in the runbook.
+- **S3-8 decision:** the worker-side PyPI name-variant workaround is **not approved and
+  not implemented**. The limitation stays disclosed (`PYPI_NAME_MATCHING_UNVERIFIED`,
+  coverage incomplete). Under M4 policies such evidence cannot produce `PASS` while the
+  policy requires complete coverage ([ADR-0013](0013-security-policy-engine.md)).
+- **Follow-up work:** signed database provenance or a SentinelPipe signing step (needs
+  approval); the S3-8 decision may be revisited with the owner; stronger isolation and
+  verified commit snapshots before any production use.

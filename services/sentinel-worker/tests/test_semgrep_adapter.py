@@ -472,7 +472,9 @@ def test_the_command_is_constant_hardened_and_takes_only_worker_values() -> None
     script = argv[2]
 
     assert argv[:2] == ["/bin/sh", "-c"]
-    assert argv[3:] == ["sentinel-semgrep", "5", str(1024 * 1024), SNAPSHOT.extraction_sha256]
+    assert argv[3:] == [
+        "sentinel-semgrep", "5", str(1024 * 1024), SNAPSHOT.extraction_sha256, RULESET_SHA256
+    ]  # fmt: skip
     for required in ("env -i ", "--config \"$input/config/rules.json\"", "--metrics=off",
                      "--disable-version-check", "--disable-nosem", "--no-git-ignore",
                      "--oss-only", "--jobs 1", "--timeout 30", "--max-memory 256", "--error",
@@ -486,6 +488,22 @@ def test_the_command_is_constant_hardened_and_takes_only_worker_values() -> None
     for forbidden in forbidden_flags:
         assert forbidden not in script.replace("--pro-", "").replace("--oss-only", ""), forbidden
     assert all(name not in " ".join(argv) for name in SNAPSHOT.ordered_paths)
+
+
+def test_the_ruleset_is_verified_inside_the_sandbox_before_semgrep_runs() -> None:
+    """Review follow-up (ADR-0011, Slice 3 note): ``config/rules.json`` is worker data that
+    the shared ``repo/`` digest does not cover. Its pinned SHA-256 is passed as a worker
+    argument and checked in the sandbox (exit 72) before Semgrep starts, as Trivy does for
+    its report template."""
+    argv = ADAPTER.command(SNAPSHOT)
+    script = argv[2]
+
+    assert argv[-1] == RULESET_SHA256 == hashlib.sha256(RULESET).hexdigest()
+    check = 'ruleset=$(sha256sum < "$input/config/rules.json") || exit 72'
+    compare = '[ "${ruleset%% *}" = "$4" ] || exit 72'
+    assert check in script
+    assert compare in script
+    assert script.index(compare) < script.index("semgrep scan")
 
 
 def test_the_semgrep_policy_is_explicit_bounded_and_mounts_nothing() -> None:

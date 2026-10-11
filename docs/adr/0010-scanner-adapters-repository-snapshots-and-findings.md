@@ -1,6 +1,7 @@
 # ADR-0010: Scanner adapters, repository snapshots and normalized findings
 
-- **Status:** Proposed (pending owner review)
+- **Status:** Accepted with conditions (2026-10-11; see [Acceptance](#acceptance)).
+  Previously Proposed.
 - **Date:** 2026-10-10
 - **Milestone:** M3 Phase 2 (Slice 1: Gitleaks)
 - **Builds on:** [ADR-0007](0007-database-authoritative-execution-leases.md) (leases),
@@ -39,7 +40,7 @@ everything scanner-specific:
 |---|---|
 | Identity and version | `gitleaks` 8.30.1 |
 | Image | `ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0…bbb7f` (the multi-platform index digest; the same digest is published on docker.io), in the sandbox image allowlist |
-| Sandbox policy | Phase 1 controls unchanged; 512 MiB memory, 128 PIDs, 64 MiB tmpfs, 2 MiB stdout, 32 MiB stdin |
+| Sandbox policy | Phase 1 controls unchanged; 512 MiB memory, 128 PIDs, 96 MiB tmpfs (corrected at acceptance; see below), 2 MiB stdout, 32 MiB stdin |
 | Input | Snapshot archive on stdin (decision 2) |
 | Command | `/bin/sh -c <constant script>` with two validated integers as positional arguments |
 | Output | `sandbox-output.v1` carrying the native JSON report as one artifact |
@@ -341,3 +342,46 @@ in pull-request comments, M5) without review.
   reasons live in the database contract (V008), and the existing ones are accurate enough
   (`SCANNER_ERROR`, retried; `RESOURCE_LIMIT_EXCEEDED`, final). Sanitized codes in the
   logs give the detail.
+
+## Acceptance
+
+- **Decision:** Accepted with conditions. The design was implemented, reviewed
+  ([Slice 1 review](../security/m3-phase2-slice1-security-review.md)), re-reviewed during
+  Slices 2 and 3, and its decisions held under adversarial testing.
+- **Date:** 2026-10-11.
+- **Decision owner:** the repository owner. Recorded on the owner's instruction; the
+  instruction authorizes recording this conditional acceptance, not waiving any
+  restriction below.
+- **Supporting CI:** GitHub Actions run #13 on `main`, commit `f0f6a83`, all six jobs
+  green (Java 21, Python 3.12, Python 3.14, real-container sandbox, end-to-end,
+  infrastructure configuration), as reported by the repository owner. The recorder did
+  not query GitHub; the only CI log archive in the working tree belongs to the preceding
+  commit `7b2c42f`, whose sandbox and end-to-end jobs failed with the Trivy image
+  `LOAD_FAILED` error that `f0f6a83` fixes. CI demonstrates the tested behaviors, not
+  complete security coverage.
+- **Production restrictions (unchanged):**
+  - Gitleaks reads only local synthetic fixtures (`LocalFixtureRepositorySource`); the
+    worker refuses `SENTINEL_WORKER_GITLEAKS_ENABLED=true` in `production`, and the API
+    refuses `GITLEAKS` in `planned-scanners` under production profiles;
+  - runc is not an adequate boundary for hostile repository content (ADR-0009); arbitrary
+    repository scanning is not authorized.
+- **Residual risks accepted as documented:**
+  - the line-based regex allowlists of `generic-api-key` and `kubernetes-secret-yaml`
+    (content on the same line can suppress those two generic rules);
+  - file-name redaction is best-effort;
+  - fingerprints are location-based and redaction labels can shift;
+  - `content_sha256` and `raw_report_sha256` can confirm a complete guess of the input;
+  - Git history and archives are not scanned; the content is not proven to be the commit
+    (`COMMIT_NOT_VERIFIED`);
+  - integrity, not authenticity: a compromised sandbox can misreport its own job;
+  - the vendored ruleset is the pinned upstream default without path allowlists
+    (derivation checked by `scripts/dev/derive-gitleaks-rules.py`).
+- **Correction recorded at acceptance:** decision 1 stated a 64 MiB tmpfs. The code
+  (`GitleaksAdapter.policy`) and the [runbook](../runbooks/gitleaks.md) have used 96 MiB
+  since `a79c2c5`; the table now says 96 MiB. No guarantee depended on the stated value
+  (the tmpfs counts against the 512 MiB memory limit).
+- **Follow-up work:**
+  - policy evaluation of `findings.v1` evidence:
+    [ADR-0013](0013-security-policy-engine.md) (M4 Phase 1);
+  - verified commit snapshots (M5) and stronger isolation before any hostile content;
+  - a shared, sandboxed file-name classification pass (needs approval).

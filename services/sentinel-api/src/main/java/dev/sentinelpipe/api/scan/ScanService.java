@@ -6,6 +6,7 @@ import dev.sentinelpipe.api.common.GitBranchNames;
 import dev.sentinelpipe.api.common.IdempotencyKeyReuseException;
 import dev.sentinelpipe.api.common.ResourceNotFoundException;
 import dev.sentinelpipe.api.common.Timestamps;
+import dev.sentinelpipe.api.policy.PolicyService;
 import dev.sentinelpipe.api.project.Project;
 import dev.sentinelpipe.api.project.ProjectService;
 import dev.sentinelpipe.api.scanjob.ScanJob;
@@ -88,11 +89,13 @@ public class ScanService {
 
 	private final ExecutionProperties execution;
 
+	private final PolicyService policies;
+
 	private final Clock clock;
 
 	ScanService(ScanRepository scans, ScanJobRepository scanJobs, ProjectService projectService,
 			ScanRequestedEvents scanRequestedEvents, PlatformTransactionManager transactionManager,
-			IdempotencyProperties idempotency, ExecutionProperties execution, Clock clock) {
+			IdempotencyProperties idempotency, ExecutionProperties execution, PolicyService policies, Clock clock) {
 		idempotency.validate();
 		this.scans = scans;
 		this.scanJobs = scanJobs;
@@ -103,6 +106,7 @@ public class ScanService {
 		this.readTransaction.setReadOnly(true);
 		this.idempotency = idempotency;
 		this.execution = execution;
+		this.policies = policies;
 		this.clock = clock;
 	}
 
@@ -112,9 +116,10 @@ public class ScanService {
 	 * constraint violation aborts the PostgreSQL transaction, so the replay lookup must
 	 * run in a new one.
 	 * <p>
-	 * A new scan, its planned jobs ({@code sentinel.execution.planned-scanners}) and its
-	 * {@code scan.requested} outbox event are written in one transaction (transactional
-	 * outbox); nothing is sent to the broker here. A replay returns the existing scan and
+	 * A new scan, its planned jobs ({@code sentinel.execution.planned-scanners}), its pinned
+	 * policy version (if the project has one in force) and its {@code scan.requested}
+	 * outbox event are written in one transaction (transactional outbox); nothing is sent
+	 * to the broker here. A replay returns the existing scan and
 	 * appends no event.
 	 * @param idempotencyKey optional; {@code null} always creates a new scan
 	 */
@@ -147,6 +152,9 @@ public class ScanService {
 						requestFingerprint, this.execution.leaseDurationSeconds(),
 						this.execution.executionTimeoutSeconds(), this.execution.evidenceRetentionDays(), now);
 				this.scans.saveAndFlush(scan);
+				// The policy version in force now is the one this scan is evaluated against
+				// (ADR-0013); later activations never change it.
+				this.policies.pinScan(scan.getId());
 				List<ScanJob> jobs = this.execution.getPlannedScanners()
 					.stream()
 					.sorted(Comparator.comparing(Enum::name))

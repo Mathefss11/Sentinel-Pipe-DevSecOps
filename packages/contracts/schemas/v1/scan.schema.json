@@ -32,7 +32,7 @@
     },
     "securityDecision": { "type": "string", "enum": ["PENDING", "PASS", "FAIL", "INCOMPLETE"] },
     "decisionReason": {
-      "description": "Why the security decision was reached; null while PENDING.",
+      "description": "Why the security decision was reached; null while PENDING. POLICY_EVALUATED: a policy evaluation record explains the decision (GET /api/v1/scans/{scanId}/evaluation); it is the reason of every decision of a COMPLETED scan pinned to a policy, including INCOMPLETE, and the only reason for PASS or FAIL. A pinned scan that is cancelled or fails during execution is INCOMPLETE with its own reason and has no evaluation record.",
       "enum": [
         null,
         "POLICY_EVALUATED",

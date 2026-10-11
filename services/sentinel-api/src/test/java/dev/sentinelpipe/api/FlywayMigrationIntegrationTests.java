@@ -35,7 +35,7 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 					"V003__identity_and_memberships.sql", "V004__transactional_outbox.sql",
 					"V005__worker_receipts_and_operations.sql",
 					"V006__least_privilege_database_roles.sql", "V007__execution_leases_and_lifecycle.sql",
-					"V008__result_integrity_and_evidence.sql");
+					"V008__result_integrity_and_evidence.sql", "V009__security_policy_engine.sql");
 		assertThat(history).allSatisfy((row) -> assertThat(row).containsEntry("success", true));
 		assertThat(flyway.info().pending()).isEmpty();
 	}
@@ -80,12 +80,14 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 				       EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
 				               WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE') AS public_execute
 				FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-				WHERE n.nspname IN ('worker', 'ops', 'lifecycle', 'evidence')
+				WHERE n.nspname IN ('worker', 'ops', 'lifecycle', 'evidence', 'policy')
 				""");
 		// Internal helpers run with the privileges of the definer function that calls them.
 		List<String> invokerHelpers = List.of("lifecycle.log_event", "lifecycle.retry_delay",
 				"lifecycle.settle_scan", "lifecycle.end_unfinished_jobs", "lifecycle.note_rejection",
-				"lifecycle.lease_rejection", "lifecycle.apply_job_outcome", "lifecycle.validate_job_result");
+				"lifecycle.lease_rejection", "lifecycle.apply_job_outcome", "lifecycle.validate_job_result",
+				"policy.validate_reasons", "policy.refuse_change", "policy.require_initial_state",
+				"policy.require_evaluation_record");
 
 		assertThat(functions).extracting((row) -> row.get("name"))
 			.containsExactlyInAnyOrder("worker.note_rejection", "worker.record_receipt", "ops.outbox_summary",
@@ -97,7 +99,10 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 					"lifecycle.end_unfinished_jobs", "lifecycle.note_rejection", "lifecycle.lease_rejection",
 					"lifecycle.apply_job_outcome", "lifecycle.validate_job_result", "lifecycle.execution_summary",
 					"lifecycle.rejection_summary", "evidence.list_result_artifacts", "evidence.read_result_artifact",
-					"evidence.purge_expired");
+					"evidence.purge_expired", "policy.refuse_change", "policy.create_policy_version",
+					"policy.assign_project_policy", "policy.pin_scan_policy", "policy.evaluation_context",
+					"policy.job_evidence", "policy.validate_reasons", "policy.record_evaluation",
+					"policy.require_initial_state", "policy.require_evaluation_record");
 		assertThat(functions).allSatisfy((row) -> {
 			assertThat(row).containsEntry("definer", !invokerHelpers.contains(row.get("name")))
 				.containsEntry("config", "search_path=pg_catalog, pg_temp")

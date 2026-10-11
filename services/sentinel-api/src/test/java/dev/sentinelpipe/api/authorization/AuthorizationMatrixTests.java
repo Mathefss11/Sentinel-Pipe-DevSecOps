@@ -19,15 +19,19 @@ class AuthorizationMatrixTests {
 
 	@Test
 	void permissionMatrixIsExactlyAsDocumented() {
-		Map<OrganizationPermission, Set<OrganizationRole>> expected = Map.of(
-				OrganizationPermission.VIEW_ORGANIZATION, EnumSet.of(OWNER, ADMIN, MEMBER, VIEWER),
-				OrganizationPermission.VIEW_PROJECTS, EnumSet.of(OWNER, ADMIN, MEMBER, VIEWER),
-				OrganizationPermission.VIEW_SCANS, EnumSet.of(OWNER, ADMIN, MEMBER, VIEWER),
-				OrganizationPermission.REQUEST_SCAN, EnumSet.of(OWNER, ADMIN, MEMBER),
-				OrganizationPermission.CANCEL_SCAN, EnumSet.of(OWNER, ADMIN, MEMBER),
-				OrganizationPermission.REGISTER_PROJECT, EnumSet.of(OWNER, ADMIN),
-				OrganizationPermission.VIEW_MEMBERS, EnumSet.of(OWNER, ADMIN),
-				OrganizationPermission.MANAGE_MEMBERS, EnumSet.of(OWNER, ADMIN));
+		Map<OrganizationPermission, Set<OrganizationRole>> expected = Map.ofEntries(
+				Map.entry(OrganizationPermission.VIEW_ORGANIZATION, EnumSet.of(OWNER, ADMIN, MEMBER, VIEWER)),
+				Map.entry(OrganizationPermission.VIEW_PROJECTS, EnumSet.of(OWNER, ADMIN, MEMBER, VIEWER)),
+				Map.entry(OrganizationPermission.VIEW_SCANS, EnumSet.of(OWNER, ADMIN, MEMBER, VIEWER)),
+				Map.entry(OrganizationPermission.VIEW_POLICIES, EnumSet.of(OWNER, ADMIN, MEMBER, VIEWER)),
+				Map.entry(OrganizationPermission.REQUEST_SCAN, EnumSet.of(OWNER, ADMIN, MEMBER)),
+				Map.entry(OrganizationPermission.CANCEL_SCAN, EnumSet.of(OWNER, ADMIN, MEMBER)),
+				Map.entry(OrganizationPermission.REGISTER_PROJECT, EnumSet.of(OWNER, ADMIN)),
+				Map.entry(OrganizationPermission.VIEW_MEMBERS, EnumSet.of(OWNER, ADMIN)),
+				Map.entry(OrganizationPermission.MANAGE_MEMBERS, EnumSet.of(OWNER, ADMIN)),
+				// M4: drafting a policy version and putting it in force are separate duties.
+				Map.entry(OrganizationPermission.MANAGE_POLICIES, EnumSet.of(OWNER, ADMIN)),
+				Map.entry(OrganizationPermission.ACTIVATE_POLICY, EnumSet.of(OWNER)));
 
 		assertThat(expected.keySet()).containsExactlyInAnyOrder(OrganizationPermission.values());
 		for (OrganizationPermission permission : OrganizationPermission.values()) {

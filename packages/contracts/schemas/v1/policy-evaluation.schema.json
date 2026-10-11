@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/policy-evaluation.schema.json",
+  "title": "Policy evaluation",
+  "description": "The immutable record of a scan's policy evaluation (ADR-0013). Decision precedence: any VIOLATION reason is FAIL (even when other evidence is incomplete); otherwise any INCOMPLETE reason is INCOMPLETE; only an evaluation without reasons is PASS. PASS means the pinned policy's requirements were met by the evidence of record, including the limitations the policy explicitly accepts; it is not a statement that the project is secure. Reasons carry codes, counts and scanner types only, never finding content. `evidence` lists the evidence of record the evaluation relied on, by digest.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "scanId",
+    "projectId",
+    "policyVersionId",
+    "policySha256",
+    "engineVersion",
+    "decision",
+    "violationCount",
+    "incompleteCount",
+    "reasons",
+    "evidence",
+    "evaluatedAt",
+    "recordedAt"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "scanId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "projectId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "policyVersionId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "policySha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "engineVersion": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9./-]{0,39}$"
+    },
+    "decision": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "INCOMPLETE"
+      ]
+    },
+    "violationCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 512
+    },
+    "incompleteCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 512
+    },
+    "reasons": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/reason"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
+    },
+    "evaluatedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "recordedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "violationCount": {
+            "const": 0
+          },
+          "incompleteCount": {
+            "const": 0
+          },
+          "reasons": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "FAIL"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "violationCount": {
+            "minimum": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "INCOMPLETE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "violationCount": {
+            "const": 0
+          },
+          "incompleteCount": {
+            "minimum": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "reason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "effect",
+        "scanner",
+        "subject",
+        "observed",
+        "limit"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "BLOCKING_FINDINGS_EXCEEDED",
+            "POLICY_INVALID",
+            "REQUIRED_SCANNER_NOT_PLANNED",
+            "SCANNER_NOT_IN_POLICY",
+            "SCANNER_EXECUTION_FAILED",
+            "SCANNER_EXECUTION_CANCELLED",
+            "SCANNER_EXECUTION_UNFINISHED",
+            "EVIDENCE_MISSING",
+            "EVIDENCE_PURGED",
+            "EVIDENCE_INTEGRITY_FAILED",
+            "EVIDENCE_BINDING_MISMATCH",
+            "EVIDENCE_INVALID",
+            "EVIDENCE_SCHEMA_UNSUPPORTED",
+            "EVIDENCE_INCONSISTENT",
+            "EVIDENCE_STALE",
+            "COVERAGE_INCOMPLETE",
+            "COVERAGE_LIMITATION_NOT_ACCEPTED",
+            "COVERAGE_METADATA_MISSING",
+            "UNSUPPORTED_SCANNER_SEVERITY",
+            "VULNERABILITY_DATABASE_TOO_OLD",
+            "VULNERABILITY_DATABASE_METADATA_INVALID",
+            "EVALUATION_ERROR"
+          ]
+        },
+        "effect": {
+          "enum": [
+            "VIOLATION",
+            "INCOMPLETE"
+          ]
+        },
+        "scanner": {
+          "enum": [
+            "SEMGREP",
+            "GITLEAKS",
+            "TRIVY",
+            "CHECKOV",
+            "SYFT",
+            "ZAP",
+            "FIXTURE",
+            null
+          ]
+        },
+        "subject": {
+          "description": "A sanitized code qualifying the reason, for example a limitation or failure reason.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+        },
+        "observed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jobId",
+        "scannerType",
+        "leaseEpoch",
+        "name",
+        "sha256",
+        "resultSha256"
+      ],
+      "properties": {
+        "jobId": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "scannerType": {
+          "enum": [
+            "SEMGREP",
+            "GITLEAKS",
+            "TRIVY",
+            "CHECKOV",
+            "SYFT",
+            "ZAP",
+            "FIXTURE"
+          ]
+        },
+        "leaseEpoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "resultSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

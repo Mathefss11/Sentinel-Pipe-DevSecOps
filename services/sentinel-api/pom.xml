@@ -28,7 +28,8 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
-		<!-- 3.x is built on Jackson 3 (tools.jackson), matching Spring Boot 4. Test scope only. -->
+		<!-- 3.x is built on Jackson 3 (tools.jackson), matching Spring Boot 4. Runtime scope since
+			M4: the policy engine validates policy.v1 definitions and findings.v1 evidence with it. -->
 		<json-schema-validator.version>3.0.8</json-schema-validator.version>
 	</properties>
 	<dependencies>
@@ -131,12 +132,12 @@
 			<artifactId>testcontainers-rabbitmq</artifactId>
 			<scope>test</scope>
 		</dependency>
-		<!-- Validates API responses and contract examples against packages/contracts. -->
+		<!-- Validates policy definitions and findings evidence at run time (ADR-0013), and API
+			responses and contract examples against packages/contracts in tests. -->
 		<dependency>
 			<groupId>com.networknt</groupId>
 			<artifactId>json-schema-validator</artifactId>
 			<version>${json-schema-validator.version}</version>
-			<scope>test</scope>
 		</dependency>
 		<!-- Parses the OpenAPI document in contract tests. Version managed by Spring Boot. -->
 		<dependency>

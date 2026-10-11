@@ -527,6 +527,82 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 	 * The lock of a verified Trivy image built from the SYNTHETIC vulnerability database
 	 * (scripts/trivy/build-fixture-db.sh, then {@code sentinel-worker trivy-image build}).
 	 */
+	// --- Security policy engine (ADR-0013) -----------------------------------------------
+
+	/**
+	 * The whole M4 path with real components: a policy created and activated through the
+	 * API, scans pinned at request time, the real worker running real Gitleaks in the
+	 * sandbox, verified evidence, and the supervisor's policy evaluation. Clean evidence
+	 * that satisfies the policy (including the limitations it explicitly accepts) is PASS;
+	 * a detected secret is FAIL. Both decisions come with an auditable record.
+	 */
+	@Test
+	void anActivePolicyTurnsRealGitleaksEvidenceIntoPassOrFailWithAnAuditableRecord() throws Exception {
+		String suffix = UUID.randomUUID().toString().substring(0, 8);
+		UUID organizationId = createOrganization();
+		JsonNode version = json(this.mockMvc
+			.perform(post("/api/v1/organizations/{id}/policies", organizationId)
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content(dev.sentinelpipe.api.policy.PolicyFixtures.gitleaksOnly("secrets")))
+			.andExpect(status().isCreated())
+			.andReturn());
+		Map<String, UUID> scans = new HashMap<>();
+		Map<String, Map<String, String>> repositories = Map.of("policy-clean-" + suffix,
+				Map.of("app.py", "print('hello')\n", "docs/notes.txt", "Nothing sensitive here.\n"),
+				"policy-leaky-" + suffix, Map.of("src/settings.py", "TOKEN = \"" + syntheticToken('P') + "\"\n"));
+		for (Map.Entry<String, Map<String, String>> repository : repositories.entrySet()) {
+			Path root = Files.createDirectories(this.fixtures.resolve("acme").resolve(repository.getKey()));
+			for (Map.Entry<String, String> file : repository.getValue().entrySet()) {
+				Path target = root.resolve(file.getKey());
+				Files.createDirectories(target.getParent());
+				Files.writeString(target, file.getValue(), StandardCharsets.UTF_8);
+			}
+			UUID projectId = createProject(organizationId, repository.getKey());
+			this.mockMvc
+				.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+					.put("/api/v1/projects/{id}/policy", projectId)
+					.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+					.content("{\"policyVersionId\": \"%s\"}".formatted(version.get("id").asString())))
+				.andExpect(status().isOk());
+			UUID scanId = UUID.fromString(json(requestScan(projectId, randomSha(), null)).get("id").asString());
+			this.lifecycle.planJob(scanId, ScannerType.GITLEAKS);
+			scans.put(repository.getKey().startsWith("policy-clean") ? "clean" : "leaky", scanId);
+		}
+
+		finish(startWorker(0, gitleaksWorker(), "--idle-timeout", "3"));
+		this.supervisor.runOnce();
+
+		Map<String, String> expected = Map.of("clean", "PASS", "leaky", "FAIL");
+		for (Map.Entry<String, UUID> scan : scans.entrySet()) {
+			UUID scanId = scan.getValue();
+			JsonNode completed = scan(scanId);
+			assertThat(completed.get("executionStatus").asString()).isEqualTo("COMPLETED");
+			assertThat(completed.get("securityDecision").asString()).as(scan.getKey())
+				.isEqualTo(expected.get(scan.getKey()));
+			assertThat(completed.get("decisionReason").asString()).isEqualTo("POLICY_EVALUATED");
+			JsonNode record = json(this.mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+				.get("/api/v1/scans/{id}/evaluation", scanId)).andExpect(status().isOk()).andReturn());
+			ContractSchemas.assertValid("policy-evaluation.schema.json", record);
+			assertThat(record.get("policyVersionId").asString()).isEqualTo(version.get("id").asString());
+			assertThat(record.get("policySha256").asString()).isEqualTo(version.get("definitionSha256").asString());
+			// The record references the verified evidence of record of the real run.
+			UUID jobId = this.jdbcTemplate.queryForObject("SELECT id FROM scan_jobs WHERE scan_id = ?", UUID.class,
+					scanId);
+			EvidenceArtifact artifact = this.evidenceStore.list(jobId).get(0);
+			assertThat(record.at("/evidence/0/jobId").asString()).isEqualTo(jobId.toString());
+			assertThat(record.at("/evidence/0/sha256").asString()).isEqualTo(artifact.sha256());
+			findings(jobId);
+		}
+		JsonNode leaky = json(this.mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+			.get("/api/v1/scans/{id}/evaluation", scans.get("leaky"))).andReturn());
+		assertThat(leaky.at("/reasons/0/code").asString()).isEqualTo("BLOCKING_FINDINGS_EXCEEDED");
+		assertThat(leaky.at("/reasons/0/observed").asInt()).isGreaterThanOrEqualTo(1);
+		// Reasons are codes and counts only: the synthetic secret is nowhere in the record.
+		assertThat(leaky.toString()).doesNotContain(syntheticToken('P'));
+		assertThat(json(this.mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+			.get("/api/v1/scans/{id}/evaluation", scans.get("clean"))).andReturn()).get("reasons")).isEmpty();
+	}
+
 	private static Path trivyLock() {
 		String lock = System.getProperty("sentinel.e2e.trivy-lock", "");
 		if (lock.isBlank() || lock.contains("${") || !Files.isRegularFile(Path.of(lock))) {

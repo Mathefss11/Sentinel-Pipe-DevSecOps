@@ -29,7 +29,8 @@ API privileges (`V006`, narrowed by `V007`):
 | `scan_jobs` | SELECT, INSERT (planning); no UPDATE |
 | `outbox_events` | SELECT, INSERT, UPDATE of publication-state columns only (never `payload`) |
 | `lifecycle.execution_events` | SELECT (append-only audit trail; written only by the lifecycle functions) |
-| functions | EXECUTE `lifecycle.supervise`, `lifecycle.complete_evaluation`, `lifecycle.cancel_scan`, `lifecycle.fail_scan`, `lifecycle.execution_summary`, `lifecycle.rejection_summary`, `evidence.list_result_artifacts`, `evidence.read_result_artifact`, `evidence.purge_expired` |
+| `policy.*` tables (V009) | SELECT only (policy versions, activations, pins and evaluation records are written only by the `policy` functions and are immutable) |
+| functions | EXECUTE `lifecycle.supervise`, `lifecycle.complete_evaluation`, `lifecycle.cancel_scan`, `lifecycle.fail_scan`, `lifecycle.execution_summary`, `lifecycle.rejection_summary`, `evidence.list_result_artifacts`, `evidence.read_result_artifact`, `evidence.purge_expired`, `policy.create_policy_version`, `policy.assign_project_policy`, `policy.pin_scan_policy`, `policy.evaluation_context`, `policy.job_evidence`, `policy.record_evaluation` |
 | `evidence.*`, `lifecycle.report_rejections` | none (functions only; no role can write evidence directly) |
 
 No `DELETE` exists on scans, jobs, outbox events or execution events: security history is

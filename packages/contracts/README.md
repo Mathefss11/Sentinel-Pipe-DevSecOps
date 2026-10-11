@@ -23,6 +23,11 @@ Machine-readable contracts of the SentinelPipe control plane API.
 | `update-membership-request.schema.json` | `PUT /api/v1/organizations/{id}/members/{membershipId}` body |
 | `current-user.schema.json` | `GET /api/v1/me` response |
 | `project-page.schema.json`, `scan-page.schema.json`, `membership-page.schema.json`, `page-metadata.schema.json` | Paginated collections |
+| `policy-definition.schema.json` | policy.v1 security policy definition, `POST /api/v1/organizations/{id}/policies` body; bundled byte-identically in the API for run-time validation ([contract](../../docs/api/policy-contract-v1.md), ADR-0013) |
+| `policy-version.schema.json` | Immutable policy version response |
+| `assign-project-policy-request.schema.json` | `PUT /api/v1/projects/{id}/policy` body |
+| `project-policy.schema.json` | Policy version in force for a project |
+| `policy-evaluation.schema.json` | `GET /api/v1/scans/{id}/evaluation` response: decision, structured reasons, evidence digests |
 | `problem-details.schema.json` | RFC 9457 error responses |
 | `common.schema.json` | Shared value types (`$defs`) |
 

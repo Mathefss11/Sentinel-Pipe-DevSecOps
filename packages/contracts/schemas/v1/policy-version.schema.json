@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/policy-version.schema.json",
+  "title": "Policy version",
+  "description": "An immutable version of a tenant-owned security policy (ADR-0013). `definition` is the stored canonical policy.v1 document and `definitionSha256` the SHA-256 of its canonical JSON text. Versions are numbered per policy name without gaps. Creating a version does not put it in force; activation is a separate, owner-only operation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "policyId",
+    "organizationId",
+    "name",
+    "version",
+    "schemaVersion",
+    "definitionSha256",
+    "definition",
+    "createdAt"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "policyId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "organizationId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "definitionSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "definition": {
+      "$ref": "policy-definition.schema.json"
+    },
+    "createdAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  }
+}

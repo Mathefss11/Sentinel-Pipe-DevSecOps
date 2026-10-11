@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/project-policy.schema.json",
+  "title": "Active project policy",
+  "description": "The policy version in force for a project. Scans are pinned to the version in force when they are requested; later activations never change how an existing scan is evaluated.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "projectId",
+    "policyVersionId",
+    "policyId",
+    "name",
+    "version",
+    "definitionSha256",
+    "assignedAt"
+  ],
+  "properties": {
+    "projectId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "policyVersionId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "policyId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "definitionSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "assignedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  }
+}

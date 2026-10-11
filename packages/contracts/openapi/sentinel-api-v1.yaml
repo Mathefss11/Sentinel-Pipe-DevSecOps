@@ -2,7 +2,7 @@ openapi: 3.1.0
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 info:
   title: SentinelPipe Control Plane API
-  version: 1.2.0-m3.1
+  version: 1.3.0-m4.1
   summary: Organizations, memberships, projects and security scan requests.
   description: |
     Domain REST API of the SentinelPipe control plane (Milestone 2, Phase 2A).
@@ -27,6 +27,9 @@ info:
     | Request scan | yes | yes | yes | no |
     | Cancel scan | yes | yes | yes | no |
     | Register project | yes | yes | no | no |
+    | View policy versions, active policy, evaluations | yes | yes | yes | yes |
+    | Create policy version | yes | yes | no | no |
+    | Activate policy version for a project | yes | no | no | no |
     | List members | yes | yes | no | no |
     | Grant / change / revoke OWNER, ADMIN | yes | no | no | no |
     | Grant / change / revoke MEMBER, VIEWER | yes | yes | no | no |
@@ -49,6 +52,12 @@ info:
     - `executionStatus` and `securityDecision` are independent. Completing
       execution never implies `PASS`; without a policy evaluation a completed
       scan is `INCOMPLETE`, and `decisionReason` says why.
+    - Security policies (ADR-0013): a scan is pinned to the policy version in
+      force for its project when it is requested, and evaluated by the
+      supervisor against the evidence of record. `PASS` means the policy's
+      requirements were met, including the limitations it explicitly accepts;
+      it is not a statement that the project is secure. Precedence: any
+      violation is `FAIL`, otherwise any incomplete reason is `INCOMPLETE`.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development (loopback only, `local` profile)
@@ -60,6 +69,7 @@ tags:
   - name: Memberships
   - name: Projects
   - name: Scans
+  - name: Policies
 
 paths:
   /api/v1/organizations:
@@ -471,6 +481,238 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/organizations/{organizationId}/policies:
+    parameters:
+      - $ref: '#/components/parameters/OrganizationId'
+    post:
+      tags: [Policies]
+      operationId: createPolicyVersion
+      summary: Create a new immutable version of a security policy (ADMIN)
+      description: |
+        The body is a policy.v1 definition. It is parsed strictly (duplicate keys
+        and trailing content are refused), validated against the closed schema
+        (unknown fields, severities outside each scanner's own scale, limitations
+        a policy may never accept, and out-of-range values are rejected) and
+        stored in canonical form. `definitionSha256` is the SHA-256 of that
+        canonical text, so equivalent definitions have the same digest.
+
+        The version number is the next one for the definition's `name` in the
+        organization. Creating a version does **not** put it in force; see
+        `PUT /api/v1/projects/{projectId}/policy`. Validation errors never echo
+        submitted values.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/policy-definition.schema.json'
+            example:
+              schema_version: 1
+              name: secrets
+              evidence:
+                findings_schema_versions: [1]
+                max_age_seconds: 86400
+              scanners:
+                GITLEAKS:
+                  require_complete_coverage: true
+                  accepted_limitations: [ARCHIVES_NOT_SCANNED, COMMIT_NOT_VERIFIED, GIT_HISTORY_NOT_SCANNED, RULESET_DEFAULT_ONLY]
+                  max_blocking_findings: 0
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: The created policy version.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/policy-version.schema.json'
+              example:
+                id: 5b0c7f1e-2a3d-4c5b-8e9f-0a1b2c3d4e5f
+                policyId: 1e2d3c4b-5a69-4788-9a0b-1c2d3e4f5a6b
+                organizationId: 0b8f6a0e-6f2b-4d55-9a8b-2c0c4b3f1d10
+                name: secrets
+                version: 1
+                schemaVersion: 1
+                definitionSha256: 67701e93f61056495efaf430c3cc143715d21b7584c6328ef6dd1c67b6a0bdfd
+                definition:
+                  evidence:
+                    findings_schema_versions: [1]
+                    max_age_seconds: 86400
+                  name: secrets
+                  scanners:
+                    GITLEAKS:
+                      accepted_limitations: [ARCHIVES_NOT_SCANNED, COMMIT_NOT_VERIFIED, GIT_HISTORY_NOT_SCANNED, RULESET_DEFAULT_ONLY]
+                      max_blocking_findings: 0
+                      require_complete_coverage: true
+                  schema_version: 1
+                createdAt: '2026-10-11T12:00:00.123456Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/policy-versions/{policyVersionId}:
+    parameters:
+      - $ref: '#/components/parameters/PolicyVersionId'
+    get:
+      tags: [Policies]
+      operationId: getPolicyVersion
+      summary: Get a policy version (any member of the owning organization)
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The policy version.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/policy-version.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/projects/{projectId}/policy:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    put:
+      tags: [Policies]
+      operationId: activateProjectPolicy
+      summary: Put a policy version in force for a project (OWNER)
+      description: |
+        Activation is owner-only, separate from drafting versions (ADMIN), because
+        it can weaken the security gate. The version must belong to the project's
+        organization; a version of another organization is reported as `404`,
+        exactly like one that does not exist. Activating the version already in
+        force is a no-op. Scans requested afterwards are pinned to this version;
+        earlier scans keep the version they were pinned to. Every activation is
+        kept in an append-only history.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/assign-project-policy-request.schema.json'
+            example:
+              policyVersionId: 5b0c7f1e-2a3d-4c5b-8e9f-0a1b2c3d4e5f
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The policy version now in force for the project.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/project-policy.schema.json'
+              example:
+                projectId: 6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f
+                policyVersionId: 5b0c7f1e-2a3d-4c5b-8e9f-0a1b2c3d4e5f
+                policyId: 1e2d3c4b-5a69-4788-9a0b-1c2d3e4f5a6b
+                name: secrets
+                version: 1
+                definitionSha256: 67701e93f61056495efaf430c3cc143715d21b7584c6328ef6dd1c67b6a0bdfd
+                assignedAt: '2026-10-11T12:01:00.5Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    get:
+      tags: [Policies]
+      operationId: getProjectPolicy
+      summary: Get the policy version in force for a project
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The policy version in force.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/project-policy.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/scans/{scanId}/evaluation:
+    parameters:
+      - name: scanId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Policies]
+      operationId: getScanEvaluation
+      summary: Get the policy evaluation record of a scan
+      description: |
+        The immutable record that produced a policy-pinned scan's decision: the
+        pinned policy version and digest, the engine version, the decision and
+        its structured reasons, and the evidence of record it relied on, by
+        digest. Evaluation itself is never triggered over HTTP; the control-plane
+        supervisor evaluates scans once execution has finished. Scans without a
+        policy have no evaluation record (`404`) and are `INCOMPLETE`
+        (`POLICY_EVALUATION_UNAVAILABLE`).
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The evaluation record.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/policy-evaluation.schema.json'
+              example:
+                id: 7c9e1a3b-5d7f-4b1c-8e2a-4c6e8a0b2d4f
+                scanId: 9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d
+                projectId: 6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f
+                policyVersionId: 5b0c7f1e-2a3d-4c5b-8e9f-0a1b2c3d4e5f
+                policySha256: 67701e93f61056495efaf430c3cc143715d21b7584c6328ef6dd1c67b6a0bdfd
+                engineVersion: sentinelpipe-policy/1.0.0
+                decision: FAIL
+                violationCount: 1
+                incompleteCount: 1
+                reasons:
+                  - code: BLOCKING_FINDINGS_EXCEEDED
+                    effect: VIOLATION
+                    scanner: GITLEAKS
+                    subject: null
+                    observed: 2
+                    limit: 0
+                  - code: REQUIRED_SCANNER_NOT_PLANNED
+                    effect: INCOMPLETE
+                    scanner: TRIVY
+                    subject: null
+                    observed: null
+                    limit: null
+                evidence:
+                  - jobId: 3c5e7a9b-0d1f-4e2a-9b3c-5d7e9f1a3b5c
+                    scannerType: GITLEAKS
+                    leaseEpoch: 1
+                    name: findings.json
+                    sha256: 2f1b8519c42b5085a2e3e6a4a70417fc2f1b8519c42b5085a2e3e6a4a70417fc
+                    resultSha256: 9f2b5c0d1e4a7b8c3d6e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c
+                evaluatedAt: '2026-10-11T12:04:30.25Z'
+                recordedAt: '2026-10-11T12:04:30.25Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/me:
     get:
       tags: [Identity]
@@ -650,6 +892,13 @@ components:
         format: uuid
     MembershipId:
       name: membershipId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PolicyVersionId:
+      name: policyVersionId
       in: path
       required: true
       schema:

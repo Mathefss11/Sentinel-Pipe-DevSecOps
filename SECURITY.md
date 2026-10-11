@@ -78,8 +78,11 @@ The current version implements the following controls:
   RFC 9457 Problem Details without stack traces, exception names, SQL or echoed input
   values.
 - **Fail-closed scan state:** failed or cancelled scans are always `INCOMPLETE`, and `PASS`
-  requires every scanner job to have completed **and** a policy evaluation, which does not
-  exist yet, so completed scans are `INCOMPLETE` with a recorded reason. Execution status
+  requires every scanner job to have completed **and** a recorded policy evaluation of
+  valid, sufficiently complete evidence (ADR-0013). PostgreSQL refuses PASS or FAIL without
+  an evaluation record, and refuses records whose decision does not follow from their
+  reasons or whose evidence is not evidence of record. Scans without a policy are
+  `INCOMPLETE` with a recorded reason. Execution status
   and security decision are separate. These invariants are enforced by PostgreSQL
   lifecycle functions and CHECK constraints (ADR-0007).
 - **Execution protocol:** workers claim jobs through `SECURITY DEFINER` functions only,
@@ -190,7 +193,8 @@ The current version implements the following controls:
   events or OIDC claims. There is no rate limiting.
 - The Compose stack is for local development only. It does not use TLS between services, and
   OPA does not authenticate clients.
-- Scanner execution, evidence integrity verification, GitHub webhook and OIDC validation, and
-  policy-based security decisions are not implemented yet.
+- GitHub webhook and OIDC validation are not implemented yet. Real scanners run on local
+  synthetic repositories only. Policy decisions (ADR-0013) trust the database owner and the
+  control-plane process; evidence integrity is verified, evidence authenticity is not.
 - Image digests and action SHAs are pinned but not yet updated automatically. Dependency
   update automation and provenance verification are planned for later milestones.

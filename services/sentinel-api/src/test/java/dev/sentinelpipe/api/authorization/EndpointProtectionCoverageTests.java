@@ -5,6 +5,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 
 import dev.sentinelpipe.api.AbstractDomainApiIntegrationTest;
 import dev.sentinelpipe.api.TestJwts;
+import dev.sentinelpipe.api.policy.PolicyFixtures;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +36,8 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 
 	private Map<String, String> pathVariables;
 
+	private UUID foreignPolicyVersionId;
+
 	@BeforeEach
 	void foreignResources() throws Exception {
 		// Real resources owned by the platform admin's organization; the outsider is no member.
@@ -42,8 +45,12 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 		UUID projectId = createProject(organizationId, "covered");
 		UUID scanId = UUID.fromString(json(requestScan(projectId, randomSha(), null)).get("id").asString());
 		UUID membershipId = grant(organizationId, uniqueSubject("m"), "MEMBER");
+		UUID policyVersionId = UUID.fromString(json(postJson("/api/v1/organizations/" + organizationId + "/policies",
+				PolicyFixtures.gitleaksOnly("covered"))).get("id").asString());
 		this.pathVariables = Map.of("organizationId", organizationId.toString(), "projectId", projectId.toString(),
-				"scanId", scanId.toString(), "membershipId", membershipId.toString());
+				"scanId", scanId.toString(), "membershipId", membershipId.toString(), "policyVersionId",
+				policyVersionId.toString());
+		this.foreignPolicyVersionId = policyVersionId;
 	}
 
 	private List<String[]> operations() {
@@ -79,7 +86,13 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 	}
 
 	/** Valid bodies, so that authorization rather than validation decides the outcome. */
-	private static String bodyFor(String method, String path) {
+	private String bodyFor(String method, String path) {
+		if (method.equals("POST") && path.endsWith("/policies")) {
+			return PolicyFixtures.gitleaksOnly("intruder");
+		}
+		if (method.equals("PUT") && path.endsWith("/policy")) {
+			return "{\"policyVersionId\": \"%s\"}".formatted(this.foreignPolicyVersionId);
+		}
 		if (method.equals("POST") && path.endsWith("/organizations")) {
 			return "{\"name\": \"x\", \"slug\": \"cov-%s\"}".formatted(UUID.randomUUID().toString().substring(0, 8));
 		}
@@ -103,7 +116,7 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 	@Test
 	void everyOperationRequiresAuthentication() throws Exception {
 		List<String[]> operations = operations();
-		assertThat(operations).hasSizeGreaterThanOrEqualTo(14);
+		assertThat(operations).hasSizeGreaterThanOrEqualTo(19);
 		for (String[] operation : operations) {
 			assertThat(status(operation[0], expand(operation[1]), null)).as("%s %s without token", operation[0],
 					operation[1])
@@ -131,6 +144,13 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 				"SELECT count(*) FROM user_identities u JOIN organization_memberships m ON m.user_identity_id = u.id "
 						+ "WHERE u.subject = 'intruder'",
 				Integer.class))
+			.isZero();
+		// No policy was created or activated by the outsider.
+		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM policy.policies WHERE name = 'intruder'",
+				Integer.class))
+			.isZero();
+		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM policy.project_assignments WHERE project_id = ?",
+				Integer.class, UUID.fromString(this.pathVariables.get("projectId"))))
 			.isZero();
 	}
 

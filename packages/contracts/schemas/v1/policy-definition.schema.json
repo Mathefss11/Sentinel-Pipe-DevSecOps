@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/policy-definition.schema.json",
+  "title": "Security policy definition (policy.v1)",
+  "description": "A declarative, versioned security policy (ADR-0013). Every scanner listed under `scanners` is mandatory: PASS requires its evidence to be present, valid, bound to the scan, fresh enough and complete enough. Severity labels are each scanner's own scale and are never mapped onto a shared scale. Unknown or malformed fields are rejected. Stored policies are canonical JSON (sorted keys, no whitespace, set-like arrays sorted) and identified by the SHA-256 of that text. No expressions, scripts or references are supported.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "evidence", "scanners"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "name": {
+      "description": "Policy name within the organization; versions of the same name form one policy.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["findings_schema_versions", "max_age_seconds"],
+      "properties": {
+        "findings_schema_versions": {
+          "description": "findings.v1 schema versions accepted as evidence. This engine supports version 1 only.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": { "const": 1 }
+        },
+        "max_age_seconds": {
+          "description": "Maximum age of a job's evidence when the scan is evaluated, measured from the job's completion with the database clock (60 s to 30 days).",
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 2592000
+        }
+      }
+    },
+    "scanners": {
+      "description": "The mandatory scanners and their requirements (1 to 3).",
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 3,
+      "additionalProperties": false,
+      "properties": {
+        "GITLEAKS": { "$ref": "#/$defs/gitleaks" },
+        "SEMGREP": { "$ref": "#/$defs/semgrep" },
+        "TRIVY": { "$ref": "#/$defs/trivy" }
+      }
+    }
+  },
+  "$defs": {
+    "requireCompleteCoverage": {
+      "description": "When true, evidence with coverage.complete = false makes the evaluation INCOMPLETE.",
+      "type": "boolean"
+    },
+    "maxBlockingFindings": {
+      "description": "More blocking findings than this is a policy violation (FAIL).",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000
+    },
+    "gitleaks": {
+      "description": "Gitleaks reports no severity: every finding (a detected secret) is blocking.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["require_complete_coverage", "accepted_limitations", "max_blocking_findings"],
+      "properties": {
+        "require_complete_coverage": { "$ref": "#/$defs/requireCompleteCoverage" },
+        "accepted_limitations": {
+          "description": "Limitations accepted explicitly; any other limitation in the evidence makes the evaluation INCOMPLETE. EMPTY_INPUT can never be accepted.",
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "enum": ["FILES_SKIPPED", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "ARCHIVES_NOT_SCANNED", "RULESET_DEFAULT_ONLY"] }
+        },
+        "max_blocking_findings": { "$ref": "#/$defs/maxBlockingFindings" }
+      }
+    },
+    "semgrep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["require_complete_coverage", "accepted_limitations", "blocking_severities", "max_blocking_findings"],
+      "properties": {
+        "require_complete_coverage": { "$ref": "#/$defs/requireCompleteCoverage" },
+        "accepted_limitations": {
+          "description": "Limitations accepted explicitly. EMPTY_INPUT and NO_SUPPORTED_FILES can never be accepted.",
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "enum": ["FILES_SKIPPED", "COMMIT_NOT_VERIFIED", "FILES_NOT_ANALYZED", "UNSUPPORTED_FILES_PRESENT", "RULESET_MINIMAL", "PATTERN_MATCHING_ONLY", "PARSE_COMPLETENESS_UNVERIFIED"] }
+        },
+        "blocking_severities": {
+          "description": "Semgrep's own labels whose findings are blocking.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "enum": ["ERROR", "WARNING", "INFO"] }
+        },
+        "max_blocking_findings": { "$ref": "#/$defs/maxBlockingFindings" }
+      }
+    },
+    "trivy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["require_complete_coverage", "accepted_limitations", "blocking_severities", "max_blocking_findings", "max_database_age_seconds"],
+      "properties": {
+        "require_complete_coverage": { "$ref": "#/$defs/requireCompleteCoverage" },
+        "accepted_limitations": {
+          "description": "Limitations accepted explicitly. EMPTY_INPUT and NO_SUPPORTED_FILES can never be accepted.",
+          "type": "array",
+          "maxItems": 24,
+          "uniqueItems": true,
+          "items": { "enum": ["FILES_SKIPPED", "COMMIT_NOT_VERIFIED", "FILES_NOT_ANALYZED", "ADVISORY_DATA_POINT_IN_TIME", "REACHABILITY_NOT_ANALYZED", "VULNERABILITY_DB_STALE", "SYNTHETIC_VULNERABILITY_DATABASE", "PARTIAL_DEPENDENCY_RESOLUTION", "UNRESOLVED_DEPENDENCY_VERSIONS", "DEPENDENCY_LOCKFILE_MISSING", "UNSUPPORTED_DEPENDENCY_FORMATS_PRESENT", "BINARY_ARTIFACTS_NOT_ANALYZED", "PACKAGE_VALUES_REDACTED", "PYPI_NAME_MATCHING_UNVERIFIED", "DEVELOPMENT_DEPENDENCIES_NOT_ANALYZED"] }
+        },
+        "blocking_severities": {
+          "description": "Trivy's own labels (as selected by Trivy from the advisory sources) whose findings are blocking. UNKNOWN is a label Trivy uses for advisories without a severity.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": { "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"] }
+        },
+        "max_blocking_findings": { "$ref": "#/$defs/maxBlockingFindings" },
+        "max_database_age_seconds": {
+          "description": "Maximum age of the vulnerability database (1 hour to 7 days), measured at job completion. Workers already refuse databases older than 7 days.",
+          "type": "integer",
+          "minimum": 3600,
+          "maximum": 604800
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "name": "baseline",
+      "evidence": { "findings_schema_versions": [1], "max_age_seconds": 86400 },
+      "scanners": {
+        "GITLEAKS": {
+          "require_complete_coverage": true,
+          "accepted_limitations": ["ARCHIVES_NOT_SCANNED", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "RULESET_DEFAULT_ONLY"],
+          "max_blocking_findings": 0
+        },
+        "SEMGREP": {
+          "require_complete_coverage": true,
+          "accepted_limitations": ["COMMIT_NOT_VERIFIED", "PARSE_COMPLETENESS_UNVERIFIED", "PATTERN_MATCHING_ONLY", "RULESET_MINIMAL", "UNSUPPORTED_FILES_PRESENT"],
+          "blocking_severities": ["ERROR", "WARNING"],
+          "max_blocking_findings": 0
+        },
+        "TRIVY": {
+          "require_complete_coverage": true,
+          "accepted_limitations": ["ADVISORY_DATA_POINT_IN_TIME", "COMMIT_NOT_VERIFIED", "REACHABILITY_NOT_ANALYZED"],
+          "blocking_severities": ["CRITICAL", "HIGH"],
+          "max_blocking_findings": 0,
+          "max_database_age_seconds": 172800
+        }
+      }
+    }
+  ]
+}

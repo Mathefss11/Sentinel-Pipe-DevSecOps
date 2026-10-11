@@ -1,0 +1,571 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/messages/v1/findings.v1.schema.json",
+  "title": "Normalized findings v1",
+  "description": "Evidence document produced by the worker from one scanner run (ADR-0010): normalized, redacted findings plus the input and coverage they apply to. Stored as the `findings.json` artifact of a job result (ADR-0008). Canonical serialization (UTF-8/ASCII, keys sorted, no whitespace); findings sorted by path, line, column, rule and fingerprint. Findings are observations, not a security decision: a document without findings does not mean PASS, and findings do not by themselves mean FAIL (policy evaluation, M4). Severity, confidence and remediation are null unless the scanner itself provides them; a scanner's own severity label is kept verbatim in the optional `scanner_severity` and is not a policy decision. Code-pattern findings (Semgrep) indicate code associated with a vulnerability class, not proven exploitability. Dependency findings (Trivy) indicate a dependency version affected by a published advisory in the recorded, point-in-time vulnerability database; they do not prove that the vulnerable code is reachable, and advisories published after the database's `updated_at` are not covered. No finding carries a source or secret excerpt. Secret findings never carry an excerpt of the detected value. Paths are persisted only in a safe form: components that look like or were detected as secrets are replaced by `[redacted-N]` labels (best-effort, not a guarantee).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scanner", "context", "input", "coverage", "execution", "finding_count", "findings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "image"],
+      "properties": {
+        "name": { "$ref": "#/$defs/scannerName" },
+        "version": { "$ref": "#/$defs/scannerVersion" },
+        "image": { "type": "string", "pattern": "^[a-z0-9./-]{1,200}@sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "context": {
+      "description": "The authoritative job context from the database lease.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["organization_id", "project_id", "scan_id", "job_id", "commit_sha"],
+      "properties": {
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "project_id": { "$ref": "#/$defs/uuid" },
+        "scan_id": { "$ref": "#/$defs/uuid" },
+        "job_id": { "$ref": "#/$defs/uuid" },
+        "commit_sha": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "commit_verified", "content_sha256", "files_scanned", "bytes_scanned", "paths_redacted", "skipped"],
+      "properties": {
+        "kind": {
+          "description": "LOCAL_FIXTURE: synthetic repository content configured on the worker (development and CI); it is not fetched from the commit.",
+          "enum": ["LOCAL_FIXTURE"]
+        },
+        "commit_verified": {
+          "description": "Whether the scanned bytes were verified to be the commit in `context`. Always false for LOCAL_FIXTURE.",
+          "type": "boolean"
+        },
+        "content_sha256": {
+          "description": "SHA-256 over `path NUL sha256(content) LF` for every scanned file in path order. It cannot be inverted, but it can confirm a guess of the entire snapshot content; it must not be published outside the tenant without review.",
+          "$ref": "#/$defs/sha256"
+        },
+        "files_scanned": { "type": "integer", "minimum": 0, "maximum": 5000 },
+        "bytes_scanned": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "paths_redacted": {
+          "description": "Number of scanned files whose path contains at least one redacted component.",
+          "type": "integer", "minimum": 0, "maximum": 5000
+        },
+        "skipped": {
+          "description": "Entries left out of the snapshot, by reason. symlink, special_file, hardlink, oversized and unsupported_name make coverage incomplete; vcs_metadata (.git) and suppression_file (root .gitleaksignore) are excluded by design.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["symlink", "special_file", "hardlink", "oversized", "unsupported_name", "vcs_metadata", "suppression_file"],
+          "properties": {
+            "symlink": { "$ref": "#/$defs/count" },
+            "special_file": { "$ref": "#/$defs/count" },
+            "hardlink": { "$ref": "#/$defs/count" },
+            "oversized": { "$ref": "#/$defs/count" },
+            "unsupported_name": { "$ref": "#/$defs/count" },
+            "vcs_metadata": { "$ref": "#/$defs/count" },
+            "suppression_file": { "$ref": "#/$defs/count" }
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "limitations"],
+      "properties": {
+        "complete": {
+          "description": "False when scannable files were skipped, or (for language-aware scanners) when a supported file was not fully analyzed. Even when true, coverage is bounded by `limitations`.",
+          "type": "boolean"
+        },
+        "files_supported": {
+          "description": "Optional (language-aware scanners): scanned files in a language the scanner and its ruleset support.",
+          "$ref": "#/$defs/fileCount"
+        },
+        "files_analyzed": {
+          "description": "Optional: supported files the scanner reported as analyzed without parse errors or timeouts.",
+          "$ref": "#/$defs/fileCount"
+        },
+        "files_not_analyzed": {
+          "description": "Optional: supported files the scanner skipped or could not fully analyze (parse errors, timeouts, memory limits, any skip).",
+          "$ref": "#/$defs/fileCount"
+        },
+        "files_unsupported": {
+          "description": "Optional: scanned files in languages the scanner or its ruleset does not cover; they were not analyzed.",
+          "$ref": "#/$defs/fileCount"
+        },
+        "dependencies": {
+          "description": "Optional (dependency scanners, Trivy): package-level coverage counts. packages: packages the scanner identified in analyzed manifests. packages_unresolved: non-root packages whose version cannot be compared with advisory ranges (missing, an unresolved property, or outside the ecosystem's version grammar), so no advisory can match them. packages_development: packages marked as development dependencies. manifests_partial: analyzed formats that resolve only part of the dependency graph offline (pom.xml, requirements.txt). manifests_lockfile_missing: dependency declarations (package.json, pyproject.toml, Pipfile, setup.py, setup.cfg, build.gradle, build.gradle.kts) without a supported lockfile in their directory or an ancestor. unsupported_dependency_files: dependency manifests of formats or ecosystems that were not analyzed. binary_artifacts: JAR/WAR/EAR/PAR, wheel and egg files, which are not analyzed. Counts only: no package names, versions or paths.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["packages", "packages_unresolved", "packages_development", "manifests_partial", "manifests_lockfile_missing", "unsupported_dependency_files", "binary_artifacts"],
+          "properties": {
+            "packages": { "$ref": "#/$defs/count" },
+            "packages_unresolved": { "$ref": "#/$defs/count" },
+            "packages_development": { "$ref": "#/$defs/count" },
+            "manifests_partial": { "$ref": "#/$defs/fileCount" },
+            "manifests_lockfile_missing": { "$ref": "#/$defs/fileCount" },
+            "unsupported_dependency_files": { "$ref": "#/$defs/fileCount" },
+            "binary_artifacts": { "$ref": "#/$defs/fileCount" }
+          }
+        },
+        "not_analyzed_reasons": {
+          "description": "Optional: why supported files were not analyzed, per reason; a file can count under several. scanner_skipped: absent from the scanner's list of analyzed files. parse_error: the scanner reported a parse error, or an independent syntax check failed. resource_limit: per-file timeout or memory limit. unverifiable_encoding: NUL bytes or a UTF-16/UTF-32 byte order mark (the scanner's result cannot be trusted).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scanner_skipped", "parse_error", "resource_limit", "unverifiable_encoding"],
+          "properties": {
+            "scanner_skipped": { "$ref": "#/$defs/fileCount" },
+            "parse_error": { "$ref": "#/$defs/fileCount" },
+            "resource_limit": { "$ref": "#/$defs/fileCount" },
+            "unverifiable_encoding": { "$ref": "#/$defs/fileCount" }
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "maxItems": 24,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["FILES_SKIPPED", "EMPTY_INPUT", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "ARCHIVES_NOT_SCANNED", "RULESET_DEFAULT_ONLY", "FILES_NOT_ANALYZED", "UNSUPPORTED_FILES_PRESENT", "NO_SUPPORTED_FILES", "RULESET_MINIMAL", "PATTERN_MATCHING_ONLY", "PARSE_COMPLETENESS_UNVERIFIED", "ADVISORY_DATA_POINT_IN_TIME", "REACHABILITY_NOT_ANALYZED", "VULNERABILITY_DB_STALE", "SYNTHETIC_VULNERABILITY_DATABASE", "PARTIAL_DEPENDENCY_RESOLUTION", "UNRESOLVED_DEPENDENCY_VERSIONS", "DEPENDENCY_LOCKFILE_MISSING", "UNSUPPORTED_DEPENDENCY_FORMATS_PRESENT", "BINARY_ARTIFACTS_NOT_ANALYZED", "PACKAGE_VALUES_REDACTED", "PYPI_NAME_MATCHING_UNVERIFIED", "DEVELOPMENT_DEPENDENCIES_NOT_ANALYZED"]
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "exit_code", "raw_report_sha256"],
+      "properties": {
+        "status": {
+          "description": "How the scanner run ended. Failed runs never produce this document.",
+          "enum": ["NO_FINDINGS", "FINDINGS_DETECTED"]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "raw_report_sha256": {
+          "description": "SHA-256 of the scanner's (already redacted) native reports, which are parsed but not stored. For Gitleaks: sha256(content report || NUL || paths report).",
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "vulnerability_database": {
+      "description": "Optional (Trivy): the vulnerability database the scan used, verified by the worker before use (ADR-0012). updated_at is when its advisory data was compiled; advisories published later are not covered. age_seconds is measured at scan time by the worker; freshness is FRESH up to 48 hours and STALE up to 7 days (older databases fail the scan). source records the provenance established when the database was prepared: the upstream OCI artifact by digest, or a synthetic test fixture.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "updated_at", "next_update", "age_seconds", "freshness", "trivy_db_sha256", "metadata_sha256", "source", "image"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "updated_at": { "$ref": "#/$defs/timestamp" },
+        "next_update": { "$ref": "#/$defs/timestamp" },
+        "age_seconds": { "type": "integer", "minimum": 0, "maximum": 604800 },
+        "freshness": { "enum": ["FRESH", "STALE"] },
+        "trivy_db_sha256": { "$ref": "#/$defs/sha256" },
+        "metadata_sha256": { "$ref": "#/$defs/sha256" },
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "repository", "manifest_digest", "blob_digest"],
+              "properties": {
+                "kind": { "const": "UPSTREAM_OCI" },
+                "repository": { "const": "ghcr.io/aquasecurity/trivy-db" },
+                "manifest_digest": { "$ref": "#/$defs/digest" },
+                "blob_digest": { "$ref": "#/$defs/digest" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "builder", "advisories_sha256"],
+              "properties": {
+                "kind": { "const": "SYNTHETIC_FIXTURE" },
+                "builder": { "type": "string", "pattern": "^[a-z0-9./-]{1,128}@v[0-9A-Za-z.+-]{1,64}$" },
+                "advisories_sha256": { "$ref": "#/$defs/sha256" }
+              }
+            }
+          ]
+        },
+        "image": {
+          "description": "The verified local scanner image (base image plus database layer): its configuration digest (store-independent) and the image id it was run as.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["config_digest", "id"],
+          "properties": {
+            "config_digest": { "$ref": "#/$defs/digest" },
+            "id": { "$ref": "#/$defs/digest" }
+          }
+        }
+      }
+    },
+    "finding_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
+    "findings": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": { "$ref": "#/$defs/finding" }
+    }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+    "advisoryId": { "type": "string", "pattern": "^[A-Z][A-Z0-9]{1,15}(-[A-Za-z0-9._]{1,32}){1,4}$" },
+    "packageValue": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" },
+    "count": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "fileCount": { "type": "integer", "minimum": 0, "maximum": 5000 },
+    "line": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000000 },
+    "column": { "type": ["integer", "null"], "minimum": 0, "maximum": 10000000 },
+    "scannerName": { "enum": ["gitleaks", "semgrep", "trivy"] },
+    "scannerVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "fingerprint", "scanner", "rule_id", "category", "description", "location", "severity", "confidence", "evidence", "remediation", "status", "occurrences"],
+      "properties": {
+        "id": {
+          "description": "Deterministic per job: UUIDv5 of the job id and fingerprint.",
+          "$ref": "#/$defs/uuid"
+        },
+        "fingerprint": {
+          "description": "SHA-256 of the canonical JSON array [\"sentinelpipe.finding.v1\", scanner, rule_id, target, safe path, start_line, end_line, start_column, end_column]. Contains no secret value and no raw path. Identical fingerprints within one run are merged (`occurrences`).",
+          "$ref": "#/$defs/sha256"
+        },
+        "scanner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "$ref": "#/$defs/scannerName" },
+            "version": { "$ref": "#/$defs/scannerVersion" }
+          }
+        },
+        "rule_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+        "category": {
+          "description": "SECRET: a detected secret (Gitleaks). CODE_PATTERN: code matching a rule associated with a vulnerability class (Semgrep); not proof of exploitability. DEPENDENCY_VULNERABILITY: a dependency version affected by a published advisory (Trivy); `rule_id` is the advisory id; not proof that the vulnerable code is reachable.",
+          "enum": ["SECRET", "CODE_PATTERN", "DEPENDENCY_VULNERABILITY"]
+        },
+        "scanner_severity": {
+          "description": "Optional: the scanner's own severity label, verbatim (Semgrep: ERROR, WARNING, INFO; Trivy: CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN, as selected by Trivy from the advisory sources). Not mapped onto `severity` and not a policy decision.",
+          "enum": ["ERROR", "WARNING", "INFO", "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+        },
+        "package": {
+          "description": "Optional (dependency findings): the affected package as declared in the manifest. Values come from repository lockfiles and are validated; token-like runs are replaced by [redacted] (`redacted`). fixed_versions come from the advisory database (empty when no fix is known). development is the scanner's development-dependency marker (null when the format does not record it).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ecosystem", "name", "installed_version", "fixed_versions", "development", "redacted"],
+          "properties": {
+            "ecosystem": { "enum": ["maven", "npm", "pypi"] },
+            "name": { "$ref": "#/$defs/packageValue" },
+            "installed_version": { "$ref": "#/$defs/packageValue" },
+            "fixed_versions": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/packageValue" } },
+            "development": { "type": ["boolean", "null"] },
+            "redacted": { "type": "boolean" }
+          }
+        },
+        "advisory": {
+          "description": "Optional (dependency findings): advisory metadata from the verified vulnerability database. aliases are the other identifiers of the same advisory (for example a GHSA id when rule_id is the CVE id). No advisory prose or URLs are stored.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["aliases", "data_source", "status"],
+          "properties": {
+            "aliases": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "$ref": "#/$defs/advisoryId" } },
+            "data_source": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+            "status": { "enum": [null, "fixed", "affected", "under_investigation", "will_not_fix", "fix_deferred", "end_of_life", "not_affected", "unknown"] }
+          }
+        },
+        "classification": {
+          "description": "Optional: weakness classes the rule is associated with, taken from the reviewed, bundled ruleset (never from scanner output).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cwe", "owasp"],
+          "properties": {
+            "cwe": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^CWE-[0-9]{1,5}$" } },
+            "owasp": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^A[0-9]{2}:20[0-9]{2}$" } }
+          }
+        },
+        "description": { "type": ["string", "null"], "maxLength": 512 },
+        "location": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target", "path", "path_redacted", "start_line", "end_line", "start_column", "end_column"],
+          "properties": {
+            "target": {
+              "description": "FILE_CONTENT: the finding is in the file's content (lines and columns set). FILE_PATH: the secret is in the file's path (lines and columns null; the path is redacted). DEPENDENCY_MANIFEST: the finding concerns a dependency declared in this manifest or lockfile (lines and columns null).",
+              "enum": ["FILE_CONTENT", "FILE_PATH", "DEPENDENCY_MANIFEST"]
+            },
+            "path_redacted": { "type": "boolean" },
+            "path": {
+              "description": "Safe relative POSIX path of a file in the scanned snapshot; redacted components appear as [redacted-N].",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^[^/\\u0000-\\u001f\\u007f-\\u009f\\\\][^\\u0000-\\u001f\\u007f-\\u009f\\\\]*$"
+            },
+            "start_line": { "$ref": "#/$defs/line" },
+            "end_line": { "$ref": "#/$defs/line" },
+            "start_column": { "$ref": "#/$defs/column" },
+            "end_column": { "$ref": "#/$defs/column" }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "target": { "const": "FILE_CONTENT" } } },
+              "then": { "properties": { "start_line": { "type": "integer" }, "end_line": { "type": "integer" } } }
+            },
+            {
+              "if": { "properties": { "target": { "const": "FILE_PATH" } } },
+              "then": {
+                "properties": {
+                  "path_redacted": { "const": true },
+                  "start_line": { "const": null }, "end_line": { "const": null },
+                  "start_column": { "const": null }, "end_column": { "const": null }
+                }
+              }
+            },
+            {
+              "if": { "properties": { "target": { "const": "DEPENDENCY_MANIFEST" } } },
+              "then": {
+                "properties": {
+                  "start_line": { "const": null }, "end_line": { "const": null },
+                  "start_column": { "const": null }, "end_column": { "const": null }
+                }
+              }
+            }
+          ]
+        },
+        "severity": { "enum": [null, "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] },
+        "confidence": { "enum": [null, "HIGH", "MEDIUM", "LOW"] },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["redacted", "excerpt"],
+          "properties": {
+            "redacted": { "type": "boolean" },
+            "excerpt": { "type": ["string", "null"], "maxLength": 512 }
+          }
+        },
+        "remediation": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["summary", "references"],
+              "properties": {
+                "summary": { "type": "string", "minLength": 1, "maxLength": 1024 },
+                "references": { "type": "array", "maxItems": 8, "items": { "type": "string", "format": "uri", "maxLength": 512 } }
+              }
+            }
+          ]
+        },
+        "status": {
+          "description": "OPEN: detected in this run and not triaged. Lifecycle states (new, existing, resolved, accepted) require comparison and exceptions (M4).",
+          "enum": ["OPEN"]
+        },
+        "occurrences": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "category": { "enum": ["SECRET", "CODE_PATTERN", "DEPENDENCY_VULNERABILITY"] } } },
+          "then": {
+            "properties": {
+              "evidence": {
+                "properties": { "redacted": { "const": true }, "excerpt": { "const": null } }
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "category": { "const": "DEPENDENCY_VULNERABILITY" } }, "required": ["category"] },
+          "then": {
+            "required": ["package", "advisory", "scanner_severity"],
+            "properties": {
+              "rule_id": { "$ref": "#/$defs/advisoryId" },
+              "location": { "properties": { "target": { "const": "DEPENDENCY_MANIFEST" } } }
+            }
+          },
+          "else": { "not": { "anyOf": [{ "required": ["package"] }, { "required": ["advisory"] }] } }
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema_version": 1,
+      "scanner": {
+        "name": "gitleaks",
+        "version": "8.30.1",
+        "image": "ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
+      },
+      "context": {
+        "organization_id": "0b6f6a43-5c1e-4c55-9d3b-1f3a7f0d2a11",
+        "project_id": "6c1f2d3e-4b5a-4f60-8e7d-9a0b1c2d3e4f",
+        "scan_id": "3f9a8b7c-6d5e-4f4a-9b3c-2d1e0f9a8b7c",
+        "job_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+        "commit_sha": "4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e"
+      },
+      "input": {
+        "kind": "LOCAL_FIXTURE",
+        "commit_verified": false,
+        "content_sha256": "9f2b5c0d1e4a7b8c3d6e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c",
+        "files_scanned": 3,
+        "bytes_scanned": 214,
+        "paths_redacted": 0,
+        "skipped": {
+          "symlink": 0,
+          "special_file": 0,
+          "hardlink": 0,
+          "oversized": 0,
+          "unsupported_name": 0,
+          "vcs_metadata": 0,
+          "suppression_file": 0
+        }
+      },
+      "coverage": {
+        "complete": true,
+        "limitations": [
+          "ARCHIVES_NOT_SCANNED",
+          "COMMIT_NOT_VERIFIED",
+          "GIT_HISTORY_NOT_SCANNED",
+          "RULESET_DEFAULT_ONLY"
+        ]
+      },
+      "execution": {
+        "status": "FINDINGS_DETECTED",
+        "exit_code": 41,
+        "raw_report_sha256": "0c8a3e1f5b7d9e2a4c6f8b0d1e3a5c7e9f1b3d5a7c9e1f3b5d7a9c1e3f5b7d9a"
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "id": "5e8f1c2a-3b4d-5e6f-8a9b-0c1d2e3f4a5b",
+          "fingerprint": "7d1e5a9c3b2f4e6d8a0c1b3e5f7a9d2c4e6b8a0d1f3c5e7b9a2d4f6c8e0b1a3d",
+          "scanner": {
+            "name": "gitleaks",
+            "version": "8.30.1"
+          },
+          "rule_id": "github-pat",
+          "category": "SECRET",
+          "description": "Uncovered a GitHub Personal Access Token, potentially leading to unauthorized repository access and sensitive content exposure.",
+          "location": {
+            "target": "FILE_CONTENT",
+            "path": "config/settings.py",
+            "path_redacted": false,
+            "start_line": 3,
+            "end_line": 3,
+            "start_column": 9,
+            "end_column": 48
+          },
+          "severity": null,
+          "confidence": null,
+          "evidence": {
+            "redacted": true,
+            "excerpt": null
+          },
+          "remediation": null,
+          "status": "OPEN",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "scanner": {
+        "name": "semgrep",
+        "version": "1.179.0",
+        "image": "semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b"
+      },
+      "context": {
+        "organization_id": "0b6f6a43-5c1e-4c55-9d3b-1f3a7f0d2a11",
+        "project_id": "6c1f2d3e-4b5a-4f60-8e7d-9a0b1c2d3e4f",
+        "scan_id": "3f9a8b7c-6d5e-4f4a-9b3c-2d1e0f9a8b7c",
+        "job_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+        "commit_sha": "4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e"
+      },
+      "input": {
+        "kind": "LOCAL_FIXTURE",
+        "commit_verified": false,
+        "content_sha256": "9f2b5c0d1e4a7b8c3d6e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c",
+        "files_scanned": 3,
+        "bytes_scanned": 214,
+        "paths_redacted": 0,
+        "skipped": {
+          "symlink": 0,
+          "special_file": 0,
+          "hardlink": 0,
+          "oversized": 0,
+          "unsupported_name": 0,
+          "vcs_metadata": 0,
+          "suppression_file": 1
+        }
+      },
+      "coverage": {
+        "complete": true,
+        "limitations": [
+          "COMMIT_NOT_VERIFIED",
+          "PARSE_COMPLETENESS_UNVERIFIED",
+          "PATTERN_MATCHING_ONLY",
+          "RULESET_MINIMAL",
+          "UNSUPPORTED_FILES_PRESENT"
+        ],
+        "files_supported": 2,
+        "files_analyzed": 2,
+        "files_not_analyzed": 0,
+        "files_unsupported": 1,
+        "not_analyzed_reasons": {
+          "scanner_skipped": 0,
+          "parse_error": 0,
+          "resource_limit": 0,
+          "unverifiable_encoding": 0
+        }
+      },
+      "execution": {
+        "status": "FINDINGS_DETECTED",
+        "exit_code": 41,
+        "raw_report_sha256": "0c8a3e1f5b7d9e2a4c6f8b0d1e3a5c7e9f1b3d5a7c9e1f3b5d7a9c1e3f5b7d9a"
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "id": "5e8f1c2a-3b4d-5e6f-8a9b-0c1d2e3f4a5b",
+          "fingerprint": "7d1e5a9c3b2f4e6d8a0c1b3e5f7a9d2c4e6b8a0d1f3c5e7b9a2d4f6c8e0b1a3d",
+          "scanner": {
+            "name": "semgrep",
+            "version": "1.179.0"
+          },
+          "rule_id": "sentinelpipe.python.sql-injection-string-formatting",
+          "category": "CODE_PATTERN",
+          "description": "A SQL statement is built with string formatting or concatenation and executed. Use parameterized queries with placeholders.",
+          "location": {
+            "target": "FILE_CONTENT",
+            "path": "app/db.py",
+            "path_redacted": false,
+            "start_line": 12,
+            "end_line": 12,
+            "start_column": 5,
+            "end_column": 61
+          },
+          "severity": null,
+          "confidence": null,
+          "evidence": {
+            "redacted": true,
+            "excerpt": null
+          },
+          "remediation": null,
+          "status": "OPEN",
+          "occurrences": 1,
+          "scanner_severity": "ERROR",
+          "classification": {
+            "cwe": [
+              "CWE-89"
+            ],
+            "owasp": [
+              "A03:2021"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -155,7 +155,7 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 	void noFunctionInTheApplicationSchemasIsExecutableByPublic() {
 		List<String> publicFunctions = this.admin.jdbc().queryForList("""
 				SELECT p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-				WHERE n.nspname IN ('public', 'worker', 'ops', 'lifecycle', 'evidence')
+				WHERE n.nspname IN ('public', 'worker', 'ops', 'lifecycle', 'evidence', 'policy')
 				  AND EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
 				              WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE')
 				""", String.class);
@@ -187,7 +187,14 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 				Map.entry("evidence.purge_expired(integer)", api), Map.entry("lifecycle.execution_summary()", api),
 				Map.entry("lifecycle.rejection_summary()", api), Map.entry("lifecycle.supervise(integer)", api),
 				Map.entry("lifecycle.complete_evaluation(uuid,text,text)", api),
-				Map.entry("lifecycle.cancel_scan(uuid,text)", api), Map.entry("lifecycle.fail_scan(uuid)", api));
+				Map.entry("lifecycle.cancel_scan(uuid,text)", api), Map.entry("lifecycle.fail_scan(uuid)", api),
+				// V009: the policy engine.
+				Map.entry("policy.create_policy_version(uuid,text,text,text)", api),
+				Map.entry("policy.assign_project_policy(uuid,uuid,text)", api),
+				Map.entry("policy.pin_scan_policy(uuid)", api), Map.entry("policy.evaluation_context(uuid)", api),
+				Map.entry("policy.job_evidence(uuid)", api),
+				Map.entry("policy.record_evaluation(uuid,uuid,text,text,text,text,text,timestamp with time zone)",
+						api));
 		for (Map.Entry<String, List<String>> function : expected.entrySet()) {
 			assertThat(this.admin.jdbc().queryForList("""
 					SELECT a.grantee::regrole::text FROM pg_proc p, aclexplode(p.proacl) a
@@ -205,6 +212,13 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 				  AND a.grantee <> p.proowner
 				""", Long.class))
 			.isZero();
+		assertThat(this.admin.jdbc().queryForObject("""
+				SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a
+				WHERE p.pronamespace = 'policy'::regnamespace
+				  AND p.proname IN ('validate_reasons', 'refuse_change', 'require_initial_state', 'require_evaluation_record')
+				  AND a.grantee <> p.proowner
+				""", Long.class))
+			.isZero();
 	}
 
 	@Test
@@ -214,7 +228,10 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 				FROM pg_class c, aclexplode(c.relacl) a
 				WHERE c.oid IN ('lifecycle.execution_events'::regclass, 'lifecycle.job_reports'::regclass,
 				                'lifecycle.report_rejections'::regclass, 'evidence.objects'::regclass,
-				                'evidence.job_artifacts'::regclass, 'evidence.result_artifacts'::regclass)
+				                'evidence.job_artifacts'::regclass, 'evidence.result_artifacts'::regclass,
+				                'policy.policies'::regclass, 'policy.policy_versions'::regclass,
+				                'policy.project_assignments'::regclass, 'policy.scan_policies'::regclass,
+				                'policy.evaluations'::regclass, 'policy.evaluation_evidence'::regclass)
 				  AND a.grantee <> c.relowner
 				""", String.class))
 			.containsExactly("sentinel_api:SELECT");
@@ -268,7 +285,7 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 		assertThat(this.admin.jdbc().queryForList("""
 				SELECT p.oid::regprocedure::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 				WHERE p.prosecdef AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-				  AND (n.nspname NOT IN ('worker', 'ops', 'lifecycle', 'evidence')
+				  AND (n.nspname NOT IN ('worker', 'ops', 'lifecycle', 'evidence', 'policy')
 				       OR p.proconfig IS NULL
 				       OR NOT 'search_path=pg_catalog, pg_temp' = ANY (p.proconfig))""", String.class))
 			.isEmpty();
@@ -314,7 +331,24 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 			"SELECT lifecycle.validate_job_result('{}'::json)",
 			"SELECT lifecycle.settle_scan(gen_random_uuid(), now(), 'USER', 'x')",
 			"SELECT lifecycle.log_event(gen_random_uuid(), NULL, 'SCAN_STARTED', 'USER', 'x', NULL, NULL)",
-			"SELECT lifecycle.end_unfinished_jobs(gen_random_uuid(), now(), 'FAILED', NULL, 'USER', 'x')" })
+			"SELECT lifecycle.end_unfinished_jobs(gen_random_uuid(), now(), 'FAILED', NULL, 'USER', 'x')",
+			// V009: policy records are written only through the policy functions, never directly.
+			"INSERT INTO policy.policies (organization_id, name, created_by) VALUES (gen_random_uuid(), 'x', 'x')",
+			"INSERT INTO policy.policy_versions (policy_id, organization_id, version, schema_version, definition,"
+					+ " definition_sha256, created_by) VALUES (gen_random_uuid(), gen_random_uuid(), 1, 1, '{}',"
+					+ " repeat('a', 64), 'x')",
+			"INSERT INTO policy.project_assignments (project_id, organization_id, policy_version_id, assigned_by)"
+					+ " VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'x')",
+			"INSERT INTO policy.scan_policies (scan_id, project_id, organization_id, policy_version_id, assignment_id)"
+					+ " VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1)",
+			"INSERT INTO policy.evaluations (scan_id) VALUES (gen_random_uuid())",
+			"UPDATE policy.policy_versions SET definition = definition", "DELETE FROM policy.policy_versions",
+			"UPDATE policy.project_assignments SET assigned_by = 'x'", "DELETE FROM policy.project_assignments",
+			"UPDATE policy.scan_policies SET pinned_at = now()", "DELETE FROM policy.scan_policies",
+			"UPDATE policy.evaluations SET decision = 'PASS'", "DELETE FROM policy.evaluations",
+			"UPDATE policy.evaluation_evidence SET sha256 = sha256", "DELETE FROM policy.evaluation_evidence",
+			"TRUNCATE policy.evaluations", "SELECT * FROM policy.validate_reasons('[]')",
+			"UPDATE scans SET decision_reason = 'POLICY_EVALUATED'" })
 	void apiRuntimeIdentityIsDenied(String sql) {
 		assertDenied(api(), sql);
 	}
@@ -353,6 +387,16 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 		assertThat(api.queryForObject("SELECT evidence.purge_expired(1)", Integer.class)).isNotNull();
 		assertThat(api.queryForMap("SELECT * FROM lifecycle.execution_summary()")).containsKey("running_jobs");
 		assertThat(api.queryForList("SELECT * FROM lifecycle.rejection_summary()")).isNotNull();
+		// V009: policy records are readable; writes go through the policy functions.
+		assertThat(api.queryForObject("SELECT count(*) FROM policy.evaluations", Long.class)).isNotNull();
+		assertThat(api.queryForList("SELECT * FROM policy.evaluation_context(gen_random_uuid())")).isEmpty();
+		assertThat(api.queryForList("SELECT * FROM policy.job_evidence(gen_random_uuid())")).isEmpty();
+		assertThat(api.queryForObject("SELECT policy.assign_project_policy(gen_random_uuid(), gen_random_uuid(), 'x')",
+				String.class))
+			.isEqualTo("PROJECT_NOT_FOUND");
+		assertThat(api.queryForObject("SELECT policy.record_evaluation(gen_random_uuid(), gen_random_uuid(),"
+				+ " repeat('a', 64), 'sentinelpipe-policy/1.0.0', 'INCOMPLETE', '[]', '[]', now())", String.class))
+			.isEqualTo("NOT_FOUND");
 	}
 
 	// ---------------------------------------------------------------------------------
@@ -378,7 +422,15 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 			"SELECT * FROM evidence.read_result_artifact(gen_random_uuid(), 1, 'x')",
 			"SELECT * FROM evidence.list_result_artifacts(gen_random_uuid())",
 			"SELECT * FROM lifecycle.execution_summary()", "SELECT * FROM lifecycle.report_rejections",
-			"SELECT lifecycle.note_rejection(gen_random_uuid(), gen_random_uuid(), 1, 1, 'RESULT', 'X')" })
+			"SELECT lifecycle.note_rejection(gen_random_uuid(), gen_random_uuid(), 1, 1, 'RESULT', 'X')",
+			// V009: workers neither read policies nor record evaluations.
+			"SELECT count(*) FROM policy.policy_versions", "SELECT count(*) FROM policy.evaluations",
+			"SELECT * FROM policy.evaluation_context(gen_random_uuid())",
+			"SELECT * FROM policy.job_evidence(gen_random_uuid())",
+			"SELECT policy.record_evaluation(gen_random_uuid(), gen_random_uuid(), repeat('a', 64), 'x', 'PASS',"
+					+ " '[]', '[]', now())",
+			"SELECT policy.assign_project_policy(gen_random_uuid(), gen_random_uuid(), 'x')",
+			"SELECT * FROM policy.create_policy_version(gen_random_uuid(), 'x', '{}', 'x')" })
 	void workerIdentityIsDenied(String sql) {
 		assertDenied(worker(), sql);
 	}
@@ -389,7 +441,10 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 			"SET ROLE sentinel_owner", "CREATE TABLE operator_probe (id int)",
 			"SELECT * FROM worker.claim_job(ARRAY['FIXTURE'])", "SELECT * FROM lifecycle.supervise(1)",
 			"SELECT lifecycle.cancel_scan(gen_random_uuid(), 'x')", "SELECT worker.submit_result(repeat('a', 64), '{}')",
-			"SELECT * FROM evidence.list_result_artifacts(gen_random_uuid())" })
+			"SELECT * FROM evidence.list_result_artifacts(gen_random_uuid())",
+			"SELECT count(*) FROM policy.evaluations",
+			"SELECT policy.record_evaluation(gen_random_uuid(), gen_random_uuid(), repeat('a', 64), 'x', 'PASS',"
+					+ " '[]', '[]', now())" })
 	void operatorIdentityIsDenied(String sql) {
 		assertDenied(operator(), sql);
 	}

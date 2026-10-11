@@ -102,6 +102,15 @@ class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 		return validationProblem(List.of(new FieldViolation(ex.getField(), ex.getMessage())));
 	}
 
+	@ExceptionHandler(InvalidDocumentException.class)
+	ResponseEntity<ProblemDetail> handleInvalidDocument(InvalidDocumentException ex) {
+		return validationProblem(ex.getViolations()
+			.stream()
+			.map((violation) -> new FieldViolation(violation.field(), violation.message()))
+			.distinct()
+			.toList());
+	}
+
 	@ExceptionHandler(DomainRuleViolationException.class)
 	ResponseEntity<ProblemDetail> handleDomainRuleViolation(DomainRuleViolationException ex) {
 		return problem(HttpStatus.CONFLICT, ProblemTypes.CONFLICT, "Conflict",

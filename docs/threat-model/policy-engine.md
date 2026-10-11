@@ -1,0 +1,70 @@
+# Threat model: security policy engine (M4 Phase 1)
+
+- **Scope:** policy versions, activation, scan pinning, evaluation and evaluation records
+  ([ADR-0013](../adr/0013-security-policy-engine.md)); Flyway V009; the
+  `dev.sentinelpipe.api.policy` module.
+- **Method:** STRIDE per data flow; each threat names its control and its test.
+- **Review:** [M4 Phase 1 security review](../security/m4-phase1-security-review.md).
+
+## Data flows and trust boundaries
+
+```text
+ tenant user ──HTTPS(JWT)──▶ API: create version (ADMIN) / activate (OWNER) / read
+                               │  strict parse, closed schema, canonical digest
+                               ▼
+                         PostgreSQL policy.* (append-only, CHECK digests, composite FKs)
+                               ▲
+ scan request (MEMBER) ──▶ API: scans INSERT + policy.pin_scan_policy (same transaction)
+
+ worker (own DB login, lease) ──▶ worker.put_evidence / worker.submit_result (ADR-0008)
+                                       │ evidence of record (current epoch only)
+ supervisor (API process) ─────────────┘
+   lock scan (FOR UPDATE SKIP LOCKED) → policy.evaluation_context + policy.job_evidence
+   → PolicyEvaluator (pure) → policy.record_evaluation (DB re-checks, completes scan)
+```
+
+Trust boundaries: (1) the HTTP caller; (2) the worker and sandbox, trusted for their own
+job only; (3) the API process (the evaluator); (4) the database owner (fully trusted,
+not defended against).
+
+## Threats
+
+| ID | STRIDE | Threat | Controls | Tests | Residual |
+|---|---|---|---|---|---|
+| P1 | Tampering | Policy text altered after creation to weaken the gate | Versions immutable (no grants, triggers refuse UPDATE/DELETE/TRUNCATE); CHECK recomputes the digest; the engine re-validates the stored text, its canonical form and digest before use (`POLICY_INVALID`) | `policyRecordsAreImmutableEvenForTheDatabaseOwnerThroughOrdinaryStatements`, `storedDefinitionsAreReverifiedBeforeUse` | The owner can disable triggers and rewrite text and digest consistently (R2) |
+| P2 | Elevation | A non-owner activates a lax policy | `ACTIVATE_POLICY` is OWNER-only; drafting (ADMIN) cannot activate | `onlyAnOwnerActivatesAndTheActivationIsReadableAndIdempotent`, `AuthorizationMatrixTests` | A single OWNER can draft and activate alone (no two-person rule yet) |
+| P3 | Spoofing / info disclosure | Cross-tenant policy reference by UUID | Membership check before reading; 404 indistinguishable from nonexistent; `assign_project_policy` compares organizations; composite FKs | `aPolicyVersionOfAnotherTenantCanNeverBeActivated`, `EndpointProtectionCoverageTests` | — |
+| P4 | Tampering (TOCTOU) | Policy changed between scan request and evaluation | The version is pinned in the scan's creating transaction; the record must name the pinned version (`POLICY_MISMATCH`, FK to `scan_policies`) | `aScanIsEvaluatedAgainstThePolicyInForceWhenItWasRequestedAndTheRecordStaysAuditable` | — |
+| P5 | Tampering | Evidence substitution: another job's, tenant's or attempt's evidence used | Evidence read only from the accepted result of the job's current epoch; result re-canonicalized to its digest; context binding; DB checks every reference is evidence of record | `evidenceThatNamesAnotherJobOrAStoredResultThatWasAlteredIsNeverTrusted`, `evidenceFromASupersededLeaseIsNeverEvaluated`, `forgedOrInconsistentEvaluationRecordsAreRefusedByTheDatabase` | A worker can still produce false evidence for its own job (R3) |
+| P6 | Tampering | Stored evidence or stored result altered at rest | Evidence bytes: CHECK + re-verification; result: re-canonicalized and compared with `result_sha256` | `anEvidenceDigestMismatchIsIncomplete`, `aStoredResultThatDiffersFromItsDigestOrReferencesOtherEvidenceIsIncomplete` | Consistent rewrite of content and digest by the owner (R2) |
+| P7 | Repudiation / tampering | Decision forged without evaluation (old `complete_evaluation` path) | V009: `complete_evaluation` refuses PASS/FAIL and pinned scans; PASS/FAIL only via `record_evaluation` with backstops | `passAndFailCannotBeRecordedWithoutAnEvaluationRecord`, `forgedOrInconsistentEvaluationRecordsAreRefusedByTheDatabase` | A compromised API process can record a consistent but false evaluation (R1) |
+| P8 | Tampering | Audit record changed or deleted | Records immutable for every runtime role; triggers; reasons digest CHECK | `aScanIsEvaluatedAgainstThePolicyInForceWhenItWasRequestedAndTheRecordStaysAuditable`, `DatabasePrivilegeIntegrationTests` | Owner (R2); no external append-only sink |
+| P9 | Elevation (fail open) | Missing, failed, stale, unsupported or unparseable evidence read as clean | Six gates; every gap is an explicit INCOMPLETE reason; `EMPTY_INPUT`/`NO_SUPPORTED_FILES` never acceptable; unknown severities never guessed; engine errors and invalid stored policies recorded as INCOMPLETE | `PolicyEvaluatorTests` (26) | PASS depends on what the policy explicitly accepts (R4) |
+| P10 | Tampering | A violation hidden by an incomplete scanner, or a violation derived from bad evidence | Precedence FAIL > INCOMPLETE > PASS (engine, function and CHECK); violations only from evidence that passed gates 1–5 | `aConfirmedViolationIsFailEvenWhenAnotherScannerIsMissingAndBothAreRecorded`, `aViolationInDiscardedEvidenceNeverCountsAsFail` | — |
+| P11 | Denial of service | Huge or deeply complex policies; huge request bodies | 16 KiB bound read before parsing; closed schema (≤ 3 scanners, ≤ 24 limitations); no expressions | `oversizedOrNonUtf8BodiesAreRefusedWithoutBeingStored`, `oversizedDefinitionsAreRejectedBeforeParsing` | Evaluation reads ≤ 16 × 1 MiB evidence per scan in memory |
+| P12 | Info disclosure | Error messages or reasons echo request values or finding content | Fixed messages; locations rebuilt from schema names; reasons hold codes and counts only; no exception chains with content | `violationsNeverEchoSubmittedValues`, `invalidDefinitionsAreRejectedWithoutEchoingTheirContent`, `reasonsNeverCarryFindingContent`, E2E secret check | — |
+| P13 | Tampering (race) | Concurrent evaluators record two inconsistent decisions | Scan row lock (`FOR UPDATE SKIP LOCKED`), status check under lock, unique evaluation per scan | `concurrentEvaluationsRecordExactlyOneDecision` | — |
+| P14 | Spoofing | Severity scale confusion (a Trivy label in Semgrep evidence) | Per-scanner vocabularies in the policy schema and in the engine | `scannerSpecificVocabulariesAreEnforced`, `unsupportedScannerSeveritiesAreReportedNeverGuessed` | — |
+| P15 | Tampering / repudiation | A runtime role inserts a scan born `COMPLETED / PASS`, or a job born completed or leased (final review M4-5) | `BEFORE INSERT` triggers require the initial state for every role but a superuser; an `AFTER INSERT/UPDATE` trigger requires a matching evaluation record for any policy decision, also in owner context | `PolicyDecisionInvariantIntegrationTests` | Superusers exempt (R2) |
+| P16 | Elevation (fail open) | Evidence reports incomplete coverage without naming the gap, and a lax policy passes it (final review M4-6) | Consistency check: incomplete coverage needs a gap-explaining limitation; gap-implying limitations need incomplete coverage | `incompleteCoverageWithoutAnExplainingLimitationIsInconsistentEvenUnderALaxPolicy` | — |
+| P17 | Tampering (race) | A scan created while an activation commits is pinned to no version, two versions, or another project's | Activation locks the project row; the scan's foreign-key check waits; one immutable pin per scan, written once | `everyScanIsPinnedToExactlyOneVersionWhileActivationsRaceWithScanCreation` | — |
+
+## Residual risks
+
+- **R1 Compromised control plane.** The API process is the evaluator. It cannot record an
+  internally inconsistent decision, but it can record a consistent, false one (for
+  example PASS with clean-looking reasons over evidence it chose not to read). Needs
+  independent re-verification or signed evaluation (future).
+- **R2 Database owner / superuser.** Can rewrite policies, evidence, digests and records
+  consistently. Out of scope until signed evidence and an external append-only audit
+  sink exist (M6/M7).
+- **R3 Integrity, not authenticity.** A compromised sandbox or worker can submit
+  plausible clean evidence for its own job (ADR-0008, ADR-0009).
+- **R4 PASS is relative.** It reflects the limitations the policy accepts and scanners
+  that are not comprehensive; local fixtures require accepting `COMMIT_NOT_VERIFIED`.
+- **R5 Single evaluation.** No re-evaluation; evidence that is stale when evaluated (for
+  example after a supervisor outage) leaves the scan INCOMPLETE; rescan.
+- **R6 Clocks.** Evidence age uses the database clock; Trivy database age also uses
+  worker-reported metadata, bounded by the database clock.
+- **R7 Accepted limitations are not listed in the record.** A PASS consumer must read the
+  pinned policy (its digest is in the record) to see which limitations were accepted.

@@ -15,9 +15,9 @@ verifiable behavior, and honest reporting of coverage and limitations.
 > the committed outbox event and its tenant relationships. All runtime identities are
 > least-privileged, including separate database owner, migration, API, worker and operator
 > roles. Workers execute jobs under fenced, database-enforced leases with heartbeats,
-> bounded retries, a hard deadline and cancellation. **No real scanner is executed yet**
-> (only a harmless fixture), and policy
-> evaluation and GitHub integration are not implemented. The domain API is still
+> bounded retries, a hard deadline and cancellation. **Real scanners (Gitleaks, Semgrep,
+> Trivy) run on local synthetic repositories only**, policy evaluation exists as a first
+> slice (M4 Phase 1), and GitHub integration is not implemented. The domain API is still
 > restricted to loopback, development-stage use (see
 > [Security limitations](#current-security-limitations)).
 
@@ -92,8 +92,12 @@ QUEUED ──▶ RUNNING ──▶ EVALUATING ──▶ COMPLETED   (decision: P
   hard deadline (15 minutes by default). When every job is terminal it becomes
   EVALUATING; the control plane then records the decision.
 - Completing execution never implies `PASS`. `PASS` requires every job `COMPLETED` **and**
-  a policy evaluation. No policy engine exists before M4, so completed scans are
-  `INCOMPLETE` with reason `POLICY_EVALUATION_UNAVAILABLE` (fail closed).
+  a recorded policy evaluation (M4 Phase 1, [ADR-0013](docs/adr/0013-security-policy-engine.md)):
+  a scan is pinned to the policy version in force for its project when it is requested,
+  and the decision follows the [decision semantics](docs/architecture/policy-decision-semantics.md)
+  (any violation is `FAIL`; otherwise any missing, invalid, stale or incomplete evidence
+  is `INCOMPLETE`). Scans without a policy are `INCOMPLETE` with reason
+  `POLICY_EVALUATION_UNAVAILABLE` (fail closed).
 - Terminal scans cannot change.
 - Workers claim jobs with leases (token, fencing epoch, 60 s expiry, heartbeats every
   15 s) through database functions only; stale, forged or cross-tenant results are
@@ -700,6 +704,23 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   Scans local synthetic repositories only. No automatic database updater.
 - [ ] Verified commit snapshots (remote repositories)
 
+ADR-0010, ADR-0011 and ADR-0012 were accepted with conditions on 2026-10-11; their residual
+risks and production restrictions are preserved in each ADR.
+
+## Milestone 4, Phase 1 progress
+
+- [x] Security policy engine, first vertical slice (V009, ADR-0013, proposed):
+  - declarative, closed [policy.v1](docs/api/policy-contract-v1.md) with canonical
+    digests; immutable versions; OWNER-only activation; scans pinned at request time;
+  - deterministic evaluator over the evidence of record (integrity, binding, validity,
+    coverage, freshness, per-scanner severities); precedence FAIL > INCOMPLETE > PASS;
+  - immutable evaluation records with structured reasons and evidence digests; database
+    refuses inconsistent records and PASS/FAIL without an evaluation;
+  - [API](docs/api/policy-evaluation-api.md), [threat model](docs/threat-model/policy-engine.md),
+    [runbook](docs/runbooks/policy-engine.md) and
+    [security review](docs/security/m4-phase1-security-review.md).
+- [ ] Re-evaluation, security exceptions, finding comparison, remediation reports
+
 ## Architecture decisions
 
 - [ADR-0001: Modular monolith control plane](docs/adr/0001-modular-monolith-control-plane.md)
@@ -718,6 +739,9 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   ([threat model](docs/threat-model/semgrep-scanner.md), [runbook](docs/runbooks/semgrep.md))
 - [ADR-0012: Trivy dependency scanning with an embedded, verified vulnerability database](docs/adr/0012-trivy-sca-with-an-embedded-verified-database.md)
   ([threat model](docs/threat-model/trivy-scanner.md), [runbook](docs/runbooks/trivy.md))
+- [ADR-0013: Security policy engine](docs/adr/0013-security-policy-engine.md)
+  ([threat model](docs/threat-model/policy-engine.md), [policy contract](docs/api/policy-contract-v1.md),
+  [decision semantics](docs/architecture/policy-decision-semantics.md))
 
 ## Current security limitations
 
@@ -746,9 +770,11 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 - Gitleaks, Semgrep and Trivy are the only real scanners. They scan **local synthetic
   repositories** only: no
   repository is fetched, and the scanned content is not verified to be the commit
-  (`commit_verified: false`). There is no policy engine, so no scan can reach `PASS` or
-  `FAIL`; completed scans are `INCOMPLETE`, with or without findings. Repository code is
-  never executed.
+  (`commit_verified: false`). A policy-pinned scan can reach `PASS` only if its policy
+  explicitly accepts `COMMIT_NOT_VERIFIED` and each scanner's inherent limitations; `PASS`
+  means the policy's requirements were met, never that a project is secure. The policy
+  engine trusts the database owner and the control-plane process (ADR-0013 residual
+  risks). Repository code is never executed.
 - Gitleaks coverage is bounded:
   - no Git history and no archives;
   - only the upstream default rules, with path allowlists removed. The line-based
@@ -793,7 +819,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 | M1 — Foundation | Complete |
 | **M2 — Domain & Contracts** | Phases 1, 2A, 2B and 2C complete (see checklists) |
 | **M3 — Scanners** | Phase 1 complete (privilege separation, leases, result integrity, sandbox); Phase 2 in progress: Gitleaks, Semgrep and Trivy done |
-| M4 — Security Gate & Remediation | OPA policies, coverage, exceptions, decisions, remediation reports |
+| **M4 — Security Gate & Remediation** | Phase 1 done: policy engine, coverage and freshness rules, decisions (ADR-0013: an in-process engine instead of OPA, direction approved by the owner; ADR Proposed until the final review and remote CI); exceptions, re-evaluation and remediation reports to follow |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |
 | M6 — Advanced Security | Checkov, Syft/SBOM, ZAP, attestation, isolated staging |
 | M7 — Hardening & Observability | Audit, timeouts, retries/DLQ, monitoring, adversarial tests |
