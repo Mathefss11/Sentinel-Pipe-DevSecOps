@@ -41,7 +41,7 @@ import os
 import re
 import stat
 import tarfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -160,6 +160,15 @@ class RepositorySnapshot:
             line = f"{hashlib.sha256(entry.content).hexdigest()}  ./{entry.path}\n"
             digest.update(line.encode("utf-8"))
         return digest.hexdigest()
+
+    def without(self, excluded: Callable[[str], bool], reason: SkipReason) -> RepositorySnapshot:
+        """A copy without the files whose path ``excluded`` matches, counted under
+        ``reason`` (for scanner control files a scanner would otherwise obey)."""
+        kept = tuple(entry for entry in self.files if not excluded(entry.path))
+        skipped = dict(self.skipped)
+        if len(kept) != len(self.files):
+            skipped[reason] = skipped.get(reason, 0) + len(self.files) - len(kept)
+        return RepositorySnapshot(files=kept, skipped=skipped, kind=self.kind)
 
     def path_manifest(self) -> bytes:
         """One path per line, in snapshot order (names contain no line breaks)."""

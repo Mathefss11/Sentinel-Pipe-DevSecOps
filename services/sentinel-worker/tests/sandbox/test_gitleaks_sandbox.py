@@ -187,7 +187,12 @@ def test_unusual_and_hostile_file_names_are_scanned_as_data(
 
     findings = document(scan(gitleaks_cli, tmp_path, "names"))
 
-    assert sorted(path for path, _, _ in located(findings)) == sorted(names)
+    # Every file is scanned. The name with an invisible bidirectional control is stored
+    # only in redacted form (Slice 2 review, S2-6): it could spoof how a path is displayed.
+    spoofing = next(name for name in names if "‮" in name)
+    expected = sorted("[redacted-1]" if name == spoofing else name for name in names)
+    assert sorted(path for path, _, _ in located(findings)) == expected
+    assert all(spoofing not in f["location"]["path"] for f in findings["findings"])
 
 
 def test_file_names_cannot_hide_secrets_from_the_ruleset(

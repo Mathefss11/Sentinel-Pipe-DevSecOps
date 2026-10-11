@@ -41,7 +41,35 @@ FIXTURE_IMAGE = "alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97
 #: index digest. The same digest is published on ghcr.io and docker.io. Reviewed for
 #: M3 Phase 2 (docs/runbooks/gitleaks.md). Must match .github/workflows/ci.yml.
 GITLEAKS_IMAGE = "ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"  # noqa: E501
-ALLOWED_IMAGES = frozenset({FIXTURE_IMAGE, GITLEAKS_IMAGE})
+#: Semgrep 1.179.0 (Community Edition CLI), official image (Alpine, BusyBox userland,
+#: linux/amd64 only), pinned by its index digest. The same digest is published as
+#: semgrep/semgrep and returntocorp/semgrep. Reviewed for M3 Phase 2 Slice 2
+#: (docs/runbooks/semgrep.md). Must match .github/workflows/ci.yml.
+SEMGREP_IMAGE = (
+    "semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b"
+)
+ALLOWED_IMAGES = frozenset({FIXTURE_IMAGE, GITLEAKS_IMAGE, SEMGREP_IMAGE})
+
+#: Environment variables an allowlisted image declares itself (``ENV`` in its config),
+#: besides ``PATH``. Docker passes them to every container of the image; they are not
+#: host values. The isolation probe accepts exactly these for that image, and tests pin
+#: them against the real image configuration. The Semgrep adapter runs Semgrep with a
+#: cleared environment anyway (``env -i``).
+IMAGE_ENVIRONMENT: dict[str, frozenset[str]] = {
+    FIXTURE_IMAGE: frozenset(),
+    GITLEAKS_IMAGE: frozenset(),
+    SEMGREP_IMAGE: frozenset(
+        {
+            "SEMGREP_IN_DOCKER",
+            "SEMGREP_USER_AGENT_APPEND",
+            "PYTHONIOENCODING",
+            "PYTHONUNBUFFERED",
+            "DOCKER_OTEL_RESOURCE_ATTRIBUTES",
+            "DD_SERVICE",
+            "TSAN_OPTIONS",
+        }
+    ),
+}
 
 #: Executables a sandbox may start (inside the image).
 ALLOWED_COMMANDS = frozenset({"/bin/sh"})

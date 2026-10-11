@@ -4,7 +4,8 @@ An adapter describes one reviewed scanner and owns everything scanner-specific:
 
 * **identity**: name, version and the digest-pinned image (:class:`~.findings.Scanner`);
 * **sandbox policy**: the image plus resource limits (:meth:`ScannerAdapter.policy`);
-* **input**: how a repository snapshot is presented (:meth:`ScannerAdapter.stdin`);
+* **input**: which files it receives (:meth:`ScannerAdapter.prepare`) and how they are
+  presented (:meth:`ScannerAdapter.stdin`);
 * **command**: a fixed, allowlisted argument vector with validated arguments only;
 * **exit-code semantics, output parsing, normalization and evidence**
   (:meth:`ScannerAdapter.interpret`), which turns one *exited* sandbox run into evidence
@@ -46,6 +47,11 @@ class ScannerAdapter(Protocol):
     def policy(
         self, timeout_seconds: float, cpus: float, runtime: str | None
     ) -> SandboxPolicy: ...  # pragma: no cover
+
+    def prepare(self, snapshot: RepositorySnapshot) -> RepositorySnapshot:
+        """The snapshot this scanner receives: the source snapshot minus repository-
+        controlled scanner control files the scanner would otherwise obey."""
+        ...  # pragma: no cover
 
     def stdin(self, snapshot: RepositorySnapshot) -> bytes: ...  # pragma: no cover
 

@@ -13,7 +13,7 @@ from typing import Any
 
 from sentinel_worker.sandbox.docker import SandboxRun
 from sentinel_worker.sandbox.fixture import FixtureMode, script_command
-from sentinel_worker.sandbox.policy import SandboxPolicy
+from sentinel_worker.sandbox.policy import IMAGE_ENVIRONMENT, SandboxPolicy
 from sentinel_worker.sandbox.protocol import InvalidOutputError, parse
 
 #: Variables the container runtime itself sets; nothing else may reach the sandbox.
@@ -70,8 +70,10 @@ def verify(run: SandboxRun, policy: SandboxPolicy) -> dict[str, Any]:
         "no_host_mounts": bool(str(seen.get("mounts", "")).split())
         and not unexpected_mounts(str(seen.get("mounts", "")).split()),
         "no_network": seen.get("internet_reachable") is False,
+        # Only the runtime's variables and those the pinned image itself declares; never a
+        # host value (no SENTINEL_* at all).
         "no_host_environment": seen.get("sentinel_variables") == 0
-        and environment <= RUNTIME_VARIABLES,
+        and environment <= RUNTIME_VARIABLES | IMAGE_ENVIRONMENT.get(policy.image, frozenset()),
         "pid_limit": seen.get("pids_max") == str(policy.pids),
         "memory_limit": seen.get("memory_max") == str(policy.memory_bytes),
         "container_removed": run.removed,

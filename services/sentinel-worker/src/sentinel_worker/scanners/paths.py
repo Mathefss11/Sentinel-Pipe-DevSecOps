@@ -10,7 +10,10 @@ when either:
   secret in content also detects it in a name. Those detections become findings on the
   path (``target = FILE_PATH``); or
 * **a heuristic flags it** (defense in depth, for credential formats without a rule): a
-  known credential prefix, or a long, high-entropy run of mixed letters and digits.
+  known credential prefix, a long, high-entropy run of mixed letters and digits, or any
+  invisible Unicode format character (zero-width, bidirectional controls). Format
+  characters have no legitimate role in file names; they can split a secret so that no
+  rule matches it, and they can spoof how a name is displayed.
 
 Labels are assigned per snapshot in the sorted order of the distinct redacted components,
 so identical snapshots produce identical safe paths, and therefore identical fingerprints,
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -49,6 +53,8 @@ def _entropy(value: str) -> float:
 def suspicious(component: str) -> bool:
     """Whether a path component looks like it contains a credential."""
     if _MARKER.search(component):
+        return True
+    if any(unicodedata.category(character) == "Cf" for character in component):
         return True
     for match in _TOKEN_RUN.finditer(component):
         run = match.group()

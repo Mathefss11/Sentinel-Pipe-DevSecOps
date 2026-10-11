@@ -408,6 +408,7 @@ $env:SENTINEL_WORKER_FIXTURE_ENABLED = "true"
 | `SENTINEL_WORKER_FIXTURE_ENABLED` / `_SECONDS` / `_MODE` | `execute`: enable the harmless FIXTURE executor (refused in `production`), its duration and test mode |
 | `SENTINEL_WORKER_FIXTURE_EXECUTOR`, `SENTINEL_WORKER_SANDBOX_*`, `SENTINEL_WORKER_DOCKER_CLI` | Sandbox (default) or inline execution, sandbox limits and runtime ([execution runbook](docs/runbooks/execution.md#5-sandboxes)) |
 | `SENTINEL_WORKER_GITLEAKS_ENABLED` / `SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR` | `execute`: run `GITLEAKS` jobs against synthetic repositories at `<dir>/<owner>/<name>` (refused in `production`; [runbook](docs/runbooks/gitleaks.md)) |
+| `SENTINEL_WORKER_SEMGREP_ENABLED` | `execute`: run `SEMGREP` jobs on the same fixtures (refused in `production`; [runbook](docs/runbooks/semgrep.md)) |
 | `SENTINEL_WORKER_EXECUTION_POLL_SECONDS` | `execute`: delay between claim attempts when idle (default 5) |
 
 Operator recovery commands (`outbox-summary`, `outbox-list-failed`,
@@ -467,7 +468,7 @@ Details: [ADR-0004](docs/adr/0004-transactional-outbox-and-at-least-once-messagi
 | Worker formatting | `.\.venv\Scripts\ruff.exe format --check .` | — |
 | Worker unit tests | `.\.venv\Scripts\python.exe -m pytest -m "not integration"` | — |
 | Worker tests incl. RabbitMQ and PostgreSQL integration | `.\.venv\Scripts\python.exe -m pytest` | Docker (Testcontainers); sandbox tests also need the pinned sandbox image (skipped otherwise) |
-| Sandbox isolation and real Gitleaks scans | `.\.venv\Scripts\python.exe -m pytest -m sandbox`, `sentinel-worker sandbox-check` and `sentinel-worker sandbox-check --profile gitleaks` | Docker, the pinned fixture and Gitleaks images ([runbook](docs/runbooks/gitleaks.md#1-pinned-image)) |
+| Sandbox isolation and real Gitleaks and Semgrep scans | `.\.venv\Scripts\python.exe -m pytest -m sandbox`, `sentinel-worker sandbox-check` and `sentinel-worker sandbox-check --profile gitleaks` / `--profile semgrep` | Docker, the pinned fixture, Gitleaks and Semgrep images ([Gitleaks](docs/runbooks/gitleaks.md#1-pinned-image), [Semgrep](docs/runbooks/semgrep.md#1-pinned-image-and-ruleset)) |
 | End to end: API → outbox → RabbitMQ → real worker | `.\mvnw.cmd verify -Pe2e "-Dsentinel.e2e.python=..\sentinel-worker\.venv\Scripts\python.exe"` (`services/sentinel-api`) | Docker, worker installed |
 | Compose configuration | `docker compose --env-file .env.example config --quiet` (repository root) | Docker |
 | OPA authorization policy | `docker run --rm -v "${PWD}\infrastructure\docker\opa:/policies:ro" openpolicyagent/opa:1.21.1 test /policies -v` | Docker |
@@ -533,11 +534,11 @@ five jobs (the worker job runs once per Python version):
   including RabbitMQ and PostgreSQL integration tests via Testcontainers (pinned images,
   pre-pulled; schema from the real Flyway migrations, identities from the real
   provisioning scripts).
-- **Sandbox isolation:** `sandbox-check` for the fixture and Gitleaks profiles, then every
+- **Sandbox isolation:** `sandbox-check` for the fixture, Gitleaks and Semgrep profiles, then every
   sandbox-marked test with real containers on Linux:
   - isolation, limits, cancellation and crash reaping;
-  - real Gitleaks scans of synthetic repositories, including symlink escapes and
-    suppression attempts.
+  - real Gitleaks and Semgrep scans of synthetic repositories, including symlink
+    escapes, hostile archives and suppression attempts.
 
   It fails, rather than skips, when the runtime or a pinned image is missing, and checks
   that no sandbox is left behind.
@@ -548,7 +549,8 @@ five jobs (the worker job runs once per Python version):
   - a forged message;
   - an audited dead-letter replay through the operator CLI;
   - sandboxed execution, cancellation and crash recovery;
-  - Gitleaks scans whose redacted findings are verified evidence, never `PASS`.
+  - Gitleaks and Semgrep scans whose redacted findings are verified evidence, never
+    `PASS`.
 
   It runs with `-Pe2e`; the profile fails if no E2E test runs.
 - **Infrastructure:** validates `compose.yaml`, checks and tests the OPA authorization
@@ -667,7 +669,19 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   - runbook and threat model.
 
   Scans local synthetic repositories only (development and CI).
-- [ ] Semgrep and Trivy adapters; verified commit snapshots (remote repositories)
+- [x] Slice 2: Semgrep SAST (ADR-0011):
+  - pinned Semgrep 1.179.0 with a bundled, checksum-pinned ruleset of 13 reviewed rules
+    for Java, Python, JavaScript and TypeScript;
+  - repository ignore files, the default ignore list, `nosemgrep`, `.gitignore`,
+    repository configuration and telemetry disabled;
+  - per-language coverage cross-check;
+  - no source excerpts in evidence;
+  - measured resource limits;
+  - shared sandbox-input fragment;
+  - real-container, integration and end-to-end tests.
+
+  Scans local synthetic repositories only.
+- [ ] Trivy adapter; verified commit snapshots (remote repositories)
 
 ## Architecture decisions
 
@@ -683,6 +697,8 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   ([threat model](docs/threat-model/execution-sandbox.md))
 - [ADR-0010: Scanner adapters, repository snapshots and normalized findings](docs/adr/0010-scanner-adapters-repository-snapshots-and-findings.md)
   ([threat model](docs/threat-model/gitleaks-scanner.md), [findings contract](docs/api/findings-contract-v1.md))
+- [ADR-0011: Semgrep SAST with a bundled, reviewed ruleset](docs/adr/0011-semgrep-sast-with-a-bundled-ruleset.md)
+  ([threat model](docs/threat-model/semgrep-scanner.md), [runbook](docs/runbooks/semgrep.md))
 
 ## Current security limitations
 
@@ -708,7 +724,8 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   should migrate in a separate step.
 - `triggerType` and `branch` are supplied by the caller and not yet verified against
   GitHub events or Actions OIDC claims. There is no rate limiting.
-- Gitleaks is the only real scanner. It scans **local synthetic repositories** only: no
+- Gitleaks and Semgrep are the only real scanners. They scan **local synthetic
+  repositories** only: no
   repository is fetched, and the scanned content is not verified to be the commit
   (`commit_verified: false`). There is no policy engine, so no scan can reach `PASS` or
   `FAIL`; completed scans are `INCOMPLETE`, with or without findings. Repository code is
@@ -718,6 +735,11 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   - only the upstream default rules, with path allowlists removed. The line-based
     allowlists of two generic rules remain;
   - links, hard links, oversized files and unsupported names are skipped.
+
+- Semgrep runs 13 pattern rules (no taint tracking) in four languages. A finding is a
+  suspicious pattern, not proof of exploitability, and a clean result is not a pass.
+  Files in other languages, and files Semgrep could not fully parse, are reported as not
+  analyzed.
 
   Every findings document records these limitations. Secrets in file names are detected
   and redacted on a best-effort basis
@@ -743,7 +765,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 |---|---|
 | M1 — Foundation | Complete |
 | **M2 — Domain & Contracts** | Phases 1, 2A, 2B and 2C complete (see checklists) |
-| **M3 — Scanners** | Phase 1 complete (privilege separation, leases, result integrity, sandbox); Phase 2 in progress: Gitleaks done, Semgrep and Trivy next |
+| **M3 — Scanners** | Phase 1 complete (privilege separation, leases, result integrity, sandbox); Phase 2 in progress: Gitleaks and Semgrep done, Trivy next |
 | M4 — Security Gate & Remediation | OPA policies, coverage, exceptions, decisions, remediation reports |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |
 | M6 — Advanced Security | Checkov, Syft/SBOM, ZAP, attestation, isolated staging |

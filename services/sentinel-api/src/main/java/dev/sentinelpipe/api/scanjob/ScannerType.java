@@ -1,14 +1,15 @@
 package dev.sentinelpipe.api.scanjob;
 
 /**
- * Scanners on the SentinelPipe roadmap. {@link #GITLEAKS} is executed by workers (ADR-0010,
- * local synthetic repositories only); the other real scanners are identifiers only.
+ * Scanners on the SentinelPipe roadmap. {@link #GITLEAKS} (ADR-0010) and {@link #SEMGREP}
+ * (ADR-0011) are executed by workers, on local synthetic repositories only; the other real
+ * scanners are identifiers only.
  * {@link #FIXTURE} is a harmless execution fixture used to exercise the execution
  * lifecycle and isolation.
  */
 public enum ScannerType {
 
-	/** Static application security testing. */
+	/** Static application security testing (Semgrep 1.179.0, bundled ruleset, ADR-0011). */
 	SEMGREP,
 
 	/** Secrets detection (Gitleaks 8.30.1 in an isolated sandbox, ADR-0010). */

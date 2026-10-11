@@ -10,7 +10,9 @@ limits are bounded here, and the image and command are fixed in code (ADR-0009).
 The GITLEAKS scanner (``SENTINEL_WORKER_GITLEAKS_ENABLED=true``, ADR-0010) scans
 synthetic repositories under ``SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR``. That local
 fixture source is the only repository input in this version, so Gitleaks is refused in
-production until a verified commit-snapshot source exists.
+production until a verified commit-snapshot source exists. The SEMGREP scanner
+(``SENTINEL_WORKER_SEMGREP_ENABLED=true``, ADR-0011) uses the same fixture source and the
+same production restriction.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ SANDBOX_CPUS_VAR = "SENTINEL_WORKER_SANDBOX_CPUS"
 SANDBOX_PIDS_VAR = "SENTINEL_WORKER_SANDBOX_PIDS"
 SANDBOX_RUNTIME_VAR = "SENTINEL_WORKER_SANDBOX_RUNTIME"
 GITLEAKS_ENABLED_VAR = "SENTINEL_WORKER_GITLEAKS_ENABLED"
+SEMGREP_ENABLED_VAR = "SENTINEL_WORKER_SEMGREP_ENABLED"
 REPOSITORY_FIXTURES_DIR_VAR = "SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR"
 EXECUTORS = ("sandbox", "inline")
 
@@ -55,6 +58,8 @@ class ExecutionSettings:
     gitleaks_enabled: bool = False
     repository_fixtures_dir: str | None = None
     gitleaks_policy: SandboxPolicy | None = None
+    semgrep_enabled: bool = False
+    semgrep_policy: SandboxPolicy | None = None
 
     @classmethod
     def from_env(
@@ -65,16 +70,21 @@ class ExecutionSettings:
         if fixture_enabled and environment is Environment.PRODUCTION:
             raise ConfigurationError(f"{FIXTURE_ENABLED_VAR}=true is not permitted in production")
         gitleaks_enabled = _flag(env, GITLEAKS_ENABLED_VAR)
-        if gitleaks_enabled and environment is Environment.PRODUCTION:
-            # The only repository input is local fixtures (no verified commit snapshots yet).
+        semgrep_enabled = _flag(env, SEMGREP_ENABLED_VAR)
+        for name, enabled in ((GITLEAKS_ENABLED_VAR, gitleaks_enabled),
+                              (SEMGREP_ENABLED_VAR, semgrep_enabled)):  # fmt: skip
+            if enabled and environment is Environment.PRODUCTION:
+                # The only repository input is local fixtures (no verified commit
+                # snapshots yet), and runc is not a boundary for hostile code (ADR-0009).
+                raise ConfigurationError(
+                    f"{name}=true is not permitted in production: repository "
+                    "input is limited to local fixtures in this version"
+                )
+        if not (fixture_enabled or gitleaks_enabled or semgrep_enabled):
             raise ConfigurationError(
-                f"{GITLEAKS_ENABLED_VAR}=true is not permitted in production: repository "
-                "input is limited to local fixtures in this version"
-            )
-        if not fixture_enabled and not gitleaks_enabled:
-            raise ConfigurationError(
-                f"no executable scanner is enabled; set {FIXTURE_ENABLED_VAR}=true or "
-                f"{GITLEAKS_ENABLED_VAR}=true (development and CI only)"
+                f"no executable scanner is enabled; set {FIXTURE_ENABLED_VAR}=true, "
+                f"{GITLEAKS_ENABLED_VAR}=true or {SEMGREP_ENABLED_VAR}=true "
+                "(development and CI only)"
             )
         executor = env.get(FIXTURE_EXECUTOR_VAR, "sandbox").strip().lower() or "sandbox"
         if executor not in EXECUTORS:
@@ -92,6 +102,7 @@ class ExecutionSettings:
         docker_cli = None
         policy = None
         gitleaks_policy = None
+        semgrep_policy = None
         fixtures_dir = None
         runtime = env.get(SANDBOX_RUNTIME_VAR, "").strip() or None
         if runtime is not None and runtime not in ALLOWED_RUNTIMES:
@@ -116,6 +127,12 @@ class ExecutionSettings:
             docker_cli = _docker_cli(env)
             fixtures_dir = _fixtures_dir(env)
             gitleaks_policy = GitleaksAdapter().policy(timeout, cpus, runtime)
+        if semgrep_enabled:
+            from sentinel_worker.scanners.semgrep import SemgrepAdapter
+
+            docker_cli = _docker_cli(env)
+            fixtures_dir = _fixtures_dir(env)
+            semgrep_policy = SemgrepAdapter().policy(timeout, cpus, runtime)
         return cls(
             database=worker_database_settings(environment, env),
             poll_interval_seconds=_bounded(env, POLL_INTERVAL_VAR, 5.0, 0.1, 60.0),
@@ -128,6 +145,8 @@ class ExecutionSettings:
             gitleaks_enabled=gitleaks_enabled,
             repository_fixtures_dir=fixtures_dir,
             gitleaks_policy=gitleaks_policy,
+            semgrep_enabled=semgrep_enabled,
+            semgrep_policy=semgrep_policy,
         )
 
 

@@ -44,7 +44,7 @@ class ExecutionPropertiesTests {
 	void onlyExecutableScannersCanBePlannedAutomatically() {
 		ExecutionProperties properties = new ExecutionProperties();
 		properties.setFixtureEnabled(true);
-		properties.setPlannedScanners(List.of(ScannerType.SEMGREP));
+		properties.setPlannedScanners(List.of(ScannerType.TRIVY));
 
 		assertThatThrownBy(() -> properties.validate(NO_PROFILES)).hasMessageContaining("not executable");
 
@@ -64,6 +64,15 @@ class ExecutionPropertiesTests {
 		assertThat(properties.isPlannable(ScannerType.GITLEAKS)).isTrue();
 	}
 
+	@Test
+	void semgrepCanBePlannedAutomaticallyOutsideProduction() {
+		ExecutionProperties properties = new ExecutionProperties();
+		properties.setPlannedScanners(List.of(ScannerType.GITLEAKS, ScannerType.SEMGREP));
+
+		assertThatCode(() -> properties.validate(new String[] { "local" })).doesNotThrowAnyException();
+		assertThat(properties.isPlannable(ScannerType.SEMGREP)).isTrue();
+	}
+
 	@ParameterizedTest
 	@ValueSource(strings = { "prod", "production", "PROD" })
 	void gitleaksIsNotPlannedAutomaticallyUnderProductionProfiles(String profile) {
@@ -74,6 +83,18 @@ class ExecutionPropertiesTests {
 		assertThatThrownBy(() -> properties.validate(new String[] { profile }))
 			.isInstanceOf(IllegalStateException.class)
 			.hasMessageContaining("GITLEAKS is not permitted with a production profile");
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = { "prod", "production", "PROD" })
+	void semgrepIsNotPlannedAutomaticallyUnderProductionProfiles(String profile) {
+		// Workers scan only local synthetic repositories with Semgrep in this version.
+		ExecutionProperties properties = new ExecutionProperties();
+		properties.setPlannedScanners(List.of(ScannerType.SEMGREP));
+
+		assertThatThrownBy(() -> properties.validate(new String[] { profile }))
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("SEMGREP is not permitted with a production profile");
 	}
 
 	@Test

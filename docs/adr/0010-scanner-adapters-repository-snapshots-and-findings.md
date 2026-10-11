@@ -246,7 +246,10 @@ documented in [findings contract v1](../api/findings-contract-v1.md).
   `occurrences`.
 - **Ids:** UUIDv5 of job id and fingerprint.
 - **Order and bytes:** findings are sorted deterministically, and the document is
-  canonical JSON, so the same input gives the same bytes.
+  canonical JSON. The same input gives the same findings, ids, fingerprints and coverage.
+  The exception is `execution.raw_report_sha256`, which digests the native report
+  actually observed and varies between runs (Gitleaks' output order is concurrent).
+  Corrected in Slice 2; the original text claimed identical bytes.
 - **Bounds:**
   - at most 1000 findings and 1 MiB per document; 5000 raw report entries; 1 MiB per
     native report;

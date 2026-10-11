@@ -82,7 +82,7 @@ class ScannerExecutor:
         if stop.is_set():
             return ExecutionResult.failed(FailureReason.WORKER_SHUTDOWN)
         try:
-            snapshot = self._source.snapshot(lease)
+            snapshot = self._adapter.prepare(self._source.snapshot(lease))
             stdin = self._adapter.stdin(snapshot)
         except InputError as exc:
             _log(logging.WARNING, "scanner.input_rejected", scanner=scanner, code=exc.code.value)

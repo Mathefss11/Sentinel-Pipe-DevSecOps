@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sentinelpipe.dev/schemas/messages/v1/findings.v1.schema.json",
   "title": "Normalized findings v1",
-  "description": "Evidence document produced by the worker from one scanner run (ADR-0010): normalized, redacted findings plus the input and coverage they apply to. Stored as the `findings.json` artifact of a job result (ADR-0008). Canonical serialization (UTF-8/ASCII, keys sorted, no whitespace); findings sorted by path, line, column, rule and fingerprint. Findings are observations, not a security decision: a document without findings does not mean PASS, and findings do not by themselves mean FAIL (policy evaluation, M4). Severity, confidence and remediation are null unless the scanner itself provides them. Secret findings never carry an excerpt of the detected value. Paths are persisted only in a safe form: components that look like or were detected as secrets are replaced by `[redacted-N]` labels (best-effort, not a guarantee).",
+  "description": "Evidence document produced by the worker from one scanner run (ADR-0010): normalized, redacted findings plus the input and coverage they apply to. Stored as the `findings.json` artifact of a job result (ADR-0008). Canonical serialization (UTF-8/ASCII, keys sorted, no whitespace); findings sorted by path, line, column, rule and fingerprint. Findings are observations, not a security decision: a document without findings does not mean PASS, and findings do not by themselves mean FAIL (policy evaluation, M4). Severity, confidence and remediation are null unless the scanner itself provides them; a scanner's own severity label is kept verbatim in the optional `scanner_severity` and is not a policy decision. Code-pattern findings (Semgrep) indicate code associated with a vulnerability class, not proven exploitability. No finding carries a source or secret excerpt. Secret findings never carry an excerpt of the detected value. Paths are persisted only in a safe form: components that look like or were detected as secrets are replaced by `[redacted-N]` labels (best-effort, not a guarantee).",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "scanner", "context", "input", "coverage", "execution", "finding_count", "findings"],
@@ -77,15 +77,43 @@
       "required": ["complete", "limitations"],
       "properties": {
         "complete": {
-          "description": "False when scannable files were skipped. Even when true, coverage is bounded by `limitations`.",
+          "description": "False when scannable files were skipped, or (for language-aware scanners) when a supported file was not fully analyzed. Even when true, coverage is bounded by `limitations`.",
           "type": "boolean"
+        },
+        "files_supported": {
+          "description": "Optional (language-aware scanners): scanned files in a language the scanner and its ruleset support.",
+          "$ref": "#/$defs/fileCount"
+        },
+        "files_analyzed": {
+          "description": "Optional: supported files the scanner reported as analyzed without parse errors or timeouts.",
+          "$ref": "#/$defs/fileCount"
+        },
+        "files_not_analyzed": {
+          "description": "Optional: supported files the scanner skipped or could not fully analyze (parse errors, timeouts, memory limits, any skip).",
+          "$ref": "#/$defs/fileCount"
+        },
+        "files_unsupported": {
+          "description": "Optional: scanned files in languages the scanner or its ruleset does not cover; they were not analyzed.",
+          "$ref": "#/$defs/fileCount"
+        },
+        "not_analyzed_reasons": {
+          "description": "Optional: why supported files were not analyzed, per reason; a file can count under several. scanner_skipped: absent from the scanner's list of analyzed files. parse_error: the scanner reported a parse error, or an independent syntax check failed. resource_limit: per-file timeout or memory limit. unverifiable_encoding: NUL bytes or a UTF-16/UTF-32 byte order mark (the scanner's result cannot be trusted).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scanner_skipped", "parse_error", "resource_limit", "unverifiable_encoding"],
+          "properties": {
+            "scanner_skipped": { "$ref": "#/$defs/fileCount" },
+            "parse_error": { "$ref": "#/$defs/fileCount" },
+            "resource_limit": { "$ref": "#/$defs/fileCount" },
+            "unverifiable_encoding": { "$ref": "#/$defs/fileCount" }
+          }
         },
         "limitations": {
           "type": "array",
-          "maxItems": 8,
+          "maxItems": 16,
           "uniqueItems": true,
           "items": {
-            "enum": ["FILES_SKIPPED", "EMPTY_INPUT", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "ARCHIVES_NOT_SCANNED", "RULESET_DEFAULT_ONLY"]
+            "enum": ["FILES_SKIPPED", "EMPTY_INPUT", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "ARCHIVES_NOT_SCANNED", "RULESET_DEFAULT_ONLY", "FILES_NOT_ANALYZED", "UNSUPPORTED_FILES_PRESENT", "NO_SUPPORTED_FILES", "RULESET_MINIMAL", "PATTERN_MATCHING_ONLY", "PARSE_COMPLETENESS_UNVERIFIED"]
           }
         }
       }
@@ -117,9 +145,10 @@
     "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "count": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+    "fileCount": { "type": "integer", "minimum": 0, "maximum": 5000 },
     "line": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000000 },
     "column": { "type": ["integer", "null"], "minimum": 0, "maximum": 10000000 },
-    "scannerName": { "enum": ["gitleaks"] },
+    "scannerName": { "enum": ["gitleaks", "semgrep"] },
     "scannerVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
     "finding": {
       "type": "object",
@@ -144,7 +173,24 @@
           }
         },
         "rule_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
-        "category": { "enum": ["SECRET"] },
+        "category": {
+          "description": "SECRET: a detected secret (Gitleaks). CODE_PATTERN: code matching a rule associated with a vulnerability class (Semgrep); not proof of exploitability.",
+          "enum": ["SECRET", "CODE_PATTERN"]
+        },
+        "scanner_severity": {
+          "description": "Optional: the scanner's own severity label, verbatim (Semgrep: ERROR, WARNING, INFO). Not mapped onto `severity` and not a policy decision.",
+          "enum": ["ERROR", "WARNING", "INFO"]
+        },
+        "classification": {
+          "description": "Optional: weakness classes the rule is associated with, taken from the reviewed, bundled ruleset (never from scanner output).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cwe", "owasp"],
+          "properties": {
+            "cwe": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^CWE-[0-9]{1,5}$" } },
+            "owasp": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^A[0-9]{2}:20[0-9]{2}$" } }
+          }
+        },
         "description": { "type": ["string", "null"], "maxLength": 512 },
         "location": {
           "type": "object",
@@ -218,7 +264,7 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "category": { "const": "SECRET" } } },
+          "if": { "properties": { "category": { "enum": ["SECRET", "CODE_PATTERN"] } } },
           "then": {
             "properties": {
               "evidence": {
@@ -252,11 +298,24 @@
         "files_scanned": 3,
         "bytes_scanned": 214,
         "paths_redacted": 0,
-        "skipped": { "symlink": 0, "special_file": 0, "hardlink": 0, "oversized": 0, "unsupported_name": 0, "vcs_metadata": 0, "suppression_file": 0 }
+        "skipped": {
+          "symlink": 0,
+          "special_file": 0,
+          "hardlink": 0,
+          "oversized": 0,
+          "unsupported_name": 0,
+          "vcs_metadata": 0,
+          "suppression_file": 0
+        }
       },
       "coverage": {
         "complete": true,
-        "limitations": ["ARCHIVES_NOT_SCANNED", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "RULESET_DEFAULT_ONLY"]
+        "limitations": [
+          "ARCHIVES_NOT_SCANNED",
+          "COMMIT_NOT_VERIFIED",
+          "GIT_HISTORY_NOT_SCANNED",
+          "RULESET_DEFAULT_ONLY"
+        ]
       },
       "execution": {
         "status": "FINDINGS_DETECTED",
@@ -268,17 +327,129 @@
         {
           "id": "5e8f1c2a-3b4d-5e6f-8a9b-0c1d2e3f4a5b",
           "fingerprint": "7d1e5a9c3b2f4e6d8a0c1b3e5f7a9d2c4e6b8a0d1f3c5e7b9a2d4f6c8e0b1a3d",
-          "scanner": { "name": "gitleaks", "version": "8.30.1" },
+          "scanner": {
+            "name": "gitleaks",
+            "version": "8.30.1"
+          },
           "rule_id": "github-pat",
           "category": "SECRET",
           "description": "Uncovered a GitHub Personal Access Token, potentially leading to unauthorized repository access and sensitive content exposure.",
-          "location": { "target": "FILE_CONTENT", "path": "config/settings.py", "path_redacted": false, "start_line": 3, "end_line": 3, "start_column": 9, "end_column": 48 },
+          "location": {
+            "target": "FILE_CONTENT",
+            "path": "config/settings.py",
+            "path_redacted": false,
+            "start_line": 3,
+            "end_line": 3,
+            "start_column": 9,
+            "end_column": 48
+          },
           "severity": null,
           "confidence": null,
-          "evidence": { "redacted": true, "excerpt": null },
+          "evidence": {
+            "redacted": true,
+            "excerpt": null
+          },
           "remediation": null,
           "status": "OPEN",
           "occurrences": 1
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "scanner": {
+        "name": "semgrep",
+        "version": "1.179.0",
+        "image": "semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b"
+      },
+      "context": {
+        "organization_id": "0b6f6a43-5c1e-4c55-9d3b-1f3a7f0d2a11",
+        "project_id": "6c1f2d3e-4b5a-4f60-8e7d-9a0b1c2d3e4f",
+        "scan_id": "3f9a8b7c-6d5e-4f4a-9b3c-2d1e0f9a8b7c",
+        "job_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+        "commit_sha": "4f2c8e1d9b7a6c5e3f1a2b4c6d8e0f1a3b5c7d9e"
+      },
+      "input": {
+        "kind": "LOCAL_FIXTURE",
+        "commit_verified": false,
+        "content_sha256": "9f2b5c0d1e4a7b8c3d6e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c",
+        "files_scanned": 3,
+        "bytes_scanned": 214,
+        "paths_redacted": 0,
+        "skipped": {
+          "symlink": 0,
+          "special_file": 0,
+          "hardlink": 0,
+          "oversized": 0,
+          "unsupported_name": 0,
+          "vcs_metadata": 0,
+          "suppression_file": 1
+        }
+      },
+      "coverage": {
+        "complete": true,
+        "limitations": [
+          "COMMIT_NOT_VERIFIED",
+          "PARSE_COMPLETENESS_UNVERIFIED",
+          "PATTERN_MATCHING_ONLY",
+          "RULESET_MINIMAL",
+          "UNSUPPORTED_FILES_PRESENT"
+        ],
+        "files_supported": 2,
+        "files_analyzed": 2,
+        "files_not_analyzed": 0,
+        "files_unsupported": 1,
+        "not_analyzed_reasons": {
+          "scanner_skipped": 0,
+          "parse_error": 0,
+          "resource_limit": 0,
+          "unverifiable_encoding": 0
+        }
+      },
+      "execution": {
+        "status": "FINDINGS_DETECTED",
+        "exit_code": 41,
+        "raw_report_sha256": "0c8a3e1f5b7d9e2a4c6f8b0d1e3a5c7e9f1b3d5a7c9e1f3b5d7a9c1e3f5b7d9a"
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "id": "5e8f1c2a-3b4d-5e6f-8a9b-0c1d2e3f4a5b",
+          "fingerprint": "7d1e5a9c3b2f4e6d8a0c1b3e5f7a9d2c4e6b8a0d1f3c5e7b9a2d4f6c8e0b1a3d",
+          "scanner": {
+            "name": "semgrep",
+            "version": "1.179.0"
+          },
+          "rule_id": "sentinelpipe.python.sql-injection-string-formatting",
+          "category": "CODE_PATTERN",
+          "description": "A SQL statement is built with string formatting or concatenation and executed. Use parameterized queries with placeholders.",
+          "location": {
+            "target": "FILE_CONTENT",
+            "path": "app/db.py",
+            "path_redacted": false,
+            "start_line": 12,
+            "end_line": 12,
+            "start_column": 5,
+            "end_column": 61
+          },
+          "severity": null,
+          "confidence": null,
+          "evidence": {
+            "redacted": true,
+            "excerpt": null
+          },
+          "remediation": null,
+          "status": "OPEN",
+          "occurrences": 1,
+          "scanner_severity": "ERROR",
+          "classification": {
+            "cwe": [
+              "CWE-89"
+            ],
+            "owasp": [
+              "A03:2021"
+            ]
+          }
         }
       ]
     }

@@ -122,9 +122,10 @@ SELECT * FROM evidence.list_result_artifacts('<job id>');
 | `SENTINEL_WORKER_SANDBOX_RUNTIME` | runc | `runsc`, `kata-runtime`, `kata` | Stronger isolation (gVisor, Kata); must be installed on the host |
 | `SENTINEL_WORKER_DOCKER_CLI` | `docker` on `PATH` | absolute path | The only executable the worker starts |
 
-Gitleaks jobs use the same timeout, CPU and runtime settings, with fixed memory, PID,
-tmpfs and stdin limits; see the [Gitleaks runbook](gitleaks.md). Verify a host with
-`sentinel-worker sandbox-check --profile gitleaks`.
+Gitleaks and Semgrep jobs use the same timeout, CPU and runtime settings, with fixed,
+scanner-specific memory, PID, tmpfs and stdin limits; see the
+[Gitleaks](gitleaks.md) and [Semgrep](semgrep.md) runbooks. Verify a host with
+`sentinel-worker sandbox-check --profile gitleaks` and `--profile semgrep`.
 
 - **Inspect sandboxes:**
   `docker ps --all --filter label=sentinelpipe.sandbox=1`. The labels include the job

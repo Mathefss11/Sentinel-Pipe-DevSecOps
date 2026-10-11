@@ -27,7 +27,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,6 +64,32 @@ class Scanner:
 
 FILE_CONTENT = "FILE_CONTENT"
 FILE_PATH = "FILE_PATH"
+#: A secret (Gitleaks).
+CATEGORY_SECRET = "SECRET"  # noqa: S105 - a category name, not a secret
+#: A code pattern associated with a vulnerability class (Semgrep). Not proof that the
+#: code is exploitable.
+CATEGORY_CODE_PATTERN = "CODE_PATTERN"
+
+
+@dataclass(frozen=True, slots=True)
+class Classification:
+    """Weakness classes a rule is associated with, from the reviewed ruleset."""
+
+    cwe: tuple[str, ...] = ()
+    owasp: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Coverage:
+    """Language-level coverage for scanners that analyze only some files. Optional in
+    findings.v1; absent for scanners that read every file (Gitleaks)."""
+
+    files_supported: int
+    files_analyzed: int
+    files_not_analyzed: int
+    files_unsupported: int
+    not_analyzed_reasons: Mapping[str, int] | None = None
+    """Per-reason counts of not-analyzed files (a file can count under several)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +107,12 @@ class Finding:
     """FILE_CONTENT (lines and columns in the file) or FILE_PATH (the file's name)."""
     path_redacted: bool = False
     severity: str | None = None
+    """Normalized severity; ``None`` unless a scanner's scale maps without invention."""
     confidence: str | None = None
+    scanner_severity: str | None = None
+    """The scanner's own severity label (for Semgrep: ERROR, WARNING, INFO), verbatim.
+    It is not a policy decision and is not mapped onto ``severity``."""
+    classification: Classification | None = None
 
     def fingerprint(self, scanner: Scanner) -> str:
         identity = [
@@ -121,6 +152,7 @@ def build_document(
     raw_report_sha256: str,
     limitations: Iterable[str],
     paths_redacted: int = 0,
+    coverage: Coverage | None = None,
 ) -> bytes:
     """Canonical findings.v1 bytes. Raises :class:`FindingsLimitError` when the findings
     exceed the bounds, :class:`ValueError` if the document would violate the schema."""
@@ -149,6 +181,18 @@ def build_document(
     if not snapshot.files:
         # Nothing was scanned: never to be read as a clean repository.
         all_limitations.add("EMPTY_INPUT")
+    complete = not any(skipped[reason.value] for reason in INCOMPLETE_COVERAGE)
+    coverage_document: dict[str, Any] = {}
+    if coverage is not None:
+        complete = complete and coverage.files_not_analyzed == 0
+        coverage_document = {
+            "files_supported": coverage.files_supported,
+            "files_analyzed": coverage.files_analyzed,
+            "files_not_analyzed": coverage.files_not_analyzed,
+            "files_unsupported": coverage.files_unsupported,
+        }
+        if coverage.not_analyzed_reasons is not None:
+            coverage_document["not_analyzed_reasons"] = dict(coverage.not_analyzed_reasons)
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "scanner": {"name": scanner.name, "version": scanner.version, "image": scanner.image},
@@ -169,8 +213,9 @@ def build_document(
             "skipped": skipped,
         },
         "coverage": {
-            "complete": not any(skipped[reason.value] for reason in INCOMPLETE_COVERAGE),
+            "complete": complete,
             "limitations": sorted(all_limitations),
+            **coverage_document,
         },
         "execution": {
             "status": "FINDINGS_DETECTED" if merged else "NO_FINDINGS",
@@ -179,30 +224,7 @@ def build_document(
         },
         "finding_count": len(merged),
         "findings": [
-            {
-                "id": str(uuid.uuid5(FINDING_NAMESPACE, f"{lease.job_id}/{fingerprint}")),
-                "fingerprint": fingerprint,
-                "scanner": {"name": scanner.name, "version": scanner.version},
-                "rule_id": finding.rule_id,
-                "category": finding.category,
-                "description": finding.description,
-                "location": {
-                    "target": finding.target,
-                    "path": finding.path,
-                    "path_redacted": finding.path_redacted,
-                    "start_line": finding.start_line,
-                    "end_line": finding.end_line,
-                    "start_column": finding.start_column,
-                    "end_column": finding.end_column,
-                },
-                "severity": finding.severity,
-                "confidence": finding.confidence,
-                # Secret findings never carry any excerpt of the detected value.
-                "evidence": {"redacted": True, "excerpt": None},
-                "remediation": None,
-                "status": "OPEN",
-                "occurrences": count,
-            }
+            _finding_document(scanner, lease, fingerprint, finding, count)
             for fingerprint, (finding, count) in ordered
         ],
     }
@@ -213,3 +235,42 @@ def build_document(
     if len(encoded) > MAX_ARTIFACT_BYTES:
         raise FindingsLimitError("findings document too large")
     return encoded
+
+
+def _finding_document(
+    scanner: Scanner, lease: JobLease, fingerprint: str, finding: Finding, count: int
+) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "id": str(uuid.uuid5(FINDING_NAMESPACE, f"{lease.job_id}/{fingerprint}")),
+        "fingerprint": fingerprint,
+        "scanner": {"name": scanner.name, "version": scanner.version},
+        "rule_id": finding.rule_id,
+        "category": finding.category,
+        "description": finding.description,
+        "location": {
+            "target": finding.target,
+            "path": finding.path,
+            "path_redacted": finding.path_redacted,
+            "start_line": finding.start_line,
+            "end_line": finding.end_line,
+            "start_column": finding.start_column,
+            "end_column": finding.end_column,
+        },
+        "severity": finding.severity,
+        "confidence": finding.confidence,
+        # No finding ever carries an excerpt: neither secret values nor source code.
+        "evidence": {"redacted": True, "excerpt": None},
+        "remediation": None,
+        "status": "OPEN",
+        "occurrences": count,
+    }
+    # Optional fields are emitted only when set, so documents of scanners that do not
+    # provide them (Gitleaks) are unchanged.
+    if finding.scanner_severity is not None:
+        document["scanner_severity"] = finding.scanner_severity
+    if finding.classification is not None:
+        document["classification"] = {
+            "cwe": list(finding.classification.cwe),
+            "owasp": list(finding.classification.owasp),
+        }
+    return document

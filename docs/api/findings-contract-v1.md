@@ -2,7 +2,9 @@
 
 - **Schema:** [`packages/contracts/messages/v1/findings.v1.schema.json`](../../packages/contracts/messages/v1/findings.v1.schema.json)
   (JSON Schema 2020-12, `$id` `https://sentinelpipe.dev/schemas/messages/v1/findings.v1.schema.json`)
-- **Producer:** the worker, from one scanner run ([ADR-0010](../adr/0010-scanner-adapters-repository-snapshots-and-findings.md))
+- **Producers:** the worker, from one scanner run: Gitleaks
+  ([ADR-0010](../adr/0010-scanner-adapters-repository-snapshots-and-findings.md)) and
+  Semgrep ([ADR-0011](../adr/0011-semgrep-sast-with-a-bundled-ruleset.md))
 - **Transport:** the evidence artifact `findings.json` (`application/json`) of a
   `job-result.v1` result. It is stored through `worker.put_evidence`: digest computed by
   PostgreSQL, tenant-scoped and bound to the lease (ADR-0008).
@@ -16,7 +18,10 @@
 - Only successful scanner runs produce a document. A failed run (scanner error, timeout,
   limits) produces none, and the job is `FAILED` with its reason.
 - Every document states what it **does not** cover (`coverage.limitations`) and whether
-  scannable content was skipped (`coverage.complete`).
+  scannable content was skipped or not fully analyzed (`coverage.complete`).
+- A `CODE_PATTERN` finding (Semgrep) means code matches a pattern associated with a
+  vulnerability class. It does not prove that untrusted data reaches the code, that the
+  code is reachable, or that it is exploitable.
 
 ## Structure
 
@@ -31,9 +36,11 @@
 | `input.files_scanned`, `input.bytes_scanned` | Size of the snapshot |
 | `input.paths_redacted` | Number of scanned files whose stored path contains a redacted component |
 | `input.skipped` | Counts per reason: `symlink`, `special_file`, `hardlink`, `oversized`, `unsupported_name` (each makes coverage incomplete); `vcs_metadata`, `suppression_file` (excluded by design) |
-| `coverage.complete` | `false` when scannable files were skipped |
-| `coverage.limitations` | Subset of `FILES_SKIPPED`, `EMPTY_INPUT` (nothing was scanned), `COMMIT_NOT_VERIFIED`, `GIT_HISTORY_NOT_SCANNED`, `ARCHIVES_NOT_SCANNED`, `RULESET_DEFAULT_ONLY` |
-| `execution` | `status` (`NO_FINDINGS` / `FINDINGS_DETECTED`), the scanner's `exit_code` (Gitleaks script: 0, 41 content, 42 file names, 43 both), and `raw_report_sha256` (the native reports are parsed but not stored) |
+| `coverage.complete` | `false` when scannable files were skipped, or (language-aware scanners) a supported file was not fully analyzed |
+| `coverage.files_supported`, `files_analyzed`, `files_not_analyzed`, `files_unsupported` | Optional (Semgrep): per-language coverage. A supported file missing from the scanner's list of analyzed files, with a parse error (from the scanner or an independent check), a timeout or memory error, or an unverifiable encoding counts as not analyzed |
+| `coverage.not_analyzed_reasons` | Optional (Semgrep): counts for `scanner_skipped`, `parse_error`, `resource_limit`, `unverifiable_encoding`; a file can count under several |
+| `coverage.limitations` | Subset of `FILES_SKIPPED`, `EMPTY_INPUT` (nothing was scanned), `COMMIT_NOT_VERIFIED`, `GIT_HISTORY_NOT_SCANNED`, `ARCHIVES_NOT_SCANNED`, `RULESET_DEFAULT_ONLY` (Gitleaks); `FILES_NOT_ANALYZED`, `UNSUPPORTED_FILES_PRESENT`, `NO_SUPPORTED_FILES`, `RULESET_MINIMAL`, `PATTERN_MATCHING_ONLY`, `PARSE_COMPLETENESS_UNVERIFIED` (Semgrep: "analyzed" means the scanner reported no problem, not that every construct was parsed) |
+| `execution` | `status` (`NO_FINDINGS` / `FINDINGS_DETECTED`), the script's `exit_code` (Gitleaks: 0, 41 content, 42 file names, 43 both; Semgrep: 0, 41), and `raw_report_sha256`: the digest of the native report(s) actually observed, which are parsed but not stored. It identifies that report; it is **not** reproducible across runs (both scanners' reports vary in ordering or timing) |
 | `finding_count` | Number of distinct findings (≤ 1000) |
 | `findings[]` | See below; sorted by path, start line, start column, rule id, fingerprint |
 
@@ -45,12 +52,14 @@
 | `fingerprint` | SHA-256 of the canonical JSON array `["sentinelpipe.finding.v1", scanner, rule_id, target, safe path, start_line, end_line, start_column, end_column]` | ✓ |
 | `scanner` | `name`, `version` | ✓ |
 | `rule_id` | Scanner rule (`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`) | e.g. `github-pat` |
-| `category` | `SECRET` (v1) | ✓ |
+| `category` | `SECRET` (Gitleaks) or `CODE_PATTERN` (Semgrep) | `SECRET` |
 | `description` | Scanner-provided, sanitized, ≤ 512 characters, or `null` | Rule description |
 | `location` | `target` (`FILE_CONTENT` or `FILE_PATH`); `path`, the **safe** relative POSIX path of a snapshot file (redacted components appear as `[redacted-N]`, ≤ 1024 characters, no control characters or backslashes); `path_redacted`; `start_line`, `end_line` (1-based), `start_column`, `end_column`. All four are `null` for `FILE_PATH`, which the schema enforces | ✓ |
-| `severity` | `null` unless the scanner provides one | `null` (not provided) |
+| `severity` | Normalized severity: `null` unless a scanner's scale maps without invention | `null` (not provided); Semgrep: `null` (its scale is not mapped) |
+| `scanner_severity` | Optional: the scanner's own label, verbatim; not a policy decision | absent; Semgrep: `ERROR`, `WARNING` or `INFO` |
+| `classification` | Optional: `cwe` and `owasp` identifiers from the reviewed, bundled ruleset (never from scanner output) | absent; Semgrep: from the rule catalog |
 | `confidence` | `null` unless the scanner provides one | `null` (not provided) |
-| `evidence` | `redacted` and `excerpt`. **For `SECRET`, the schema requires `{redacted: true, excerpt: null}`** | Always redacted, no excerpt |
+| `evidence` | `redacted` and `excerpt`. **For `SECRET` and `CODE_PATTERN`, the schema requires `{redacted: true, excerpt: null}`**: no secret value and no source code is ever stored | Always redacted, no excerpt |
 | `remediation` | `null`, or `summary` and `references` when a scanner or the knowledge base (M4) provides them | `null` |
 | `status` | `OPEN`: detected in this run, not triaged | `OPEN` |
 | `occurrences` | Identical fingerprints merged in this run | ≥ 1 |
@@ -74,10 +83,15 @@ persisted only in a safe form:
 
 ## Determinism and deduplication
 
-- **Same bytes for the same input.** The same snapshot scanned for the same job yields
-  byte-identical documents: canonical JSON (sorted keys, no whitespace, ASCII escapes),
-  deterministic order and ids. This is independent of the scanner's output order, which
-  is concurrent for Gitleaks.
+- **Reproducible content for the same input.** The same snapshot scanned for the same
+  job yields the same findings, ids, fingerprints, order and coverage. The document is
+  canonical JSON (sorted keys, no whitespace, ASCII escapes), and the result does not
+  depend on the scanner's output order.
+- **The one exception is `execution.raw_report_sha256`.** It digests the native report
+  actually observed, which varies between runs: Gitleaks' order is concurrent, and
+  Semgrep's report includes timing data. Whole-document bytes therefore differ only in
+  that field. Earlier text claiming byte-identical documents was incorrect and was
+  corrected in Slice 2.
 - **What a fingerprint means.** Fingerprints are identical across jobs and tenants for
   the same rule and (safe) location. They contain **no secret value and no raw path**;
   the secret is deliberately not hashed, because a hash of a weak secret can be
@@ -101,6 +115,10 @@ persisted only in a safe form:
   truncated.
 
 ## Compatibility
+
+Slice 2 (Semgrep) extended v1 compatibly. It added scanner `semgrep`, category
+`CODE_PATTERN`, optional `scanner_severity`, `classification` and coverage counts, and
+new limitation codes. Gitleaks documents are unchanged and still valid.
 
 - The version lives in the file name, the `$id` and `schema_version`. Consumers must
   reject unknown versions.

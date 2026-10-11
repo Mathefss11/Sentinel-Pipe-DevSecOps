@@ -296,6 +296,10 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 
 	/** A project whose repository acme/{name} is a synthetic fixture with these files. */
 	private UUID gitleaksScan(String name, Map<String, String> files) throws Exception {
+		return fixtureScan(name, files, ScannerType.GITLEAKS);
+	}
+
+	private UUID fixtureScan(String name, Map<String, String> files, ScannerType scanner) throws Exception {
 		Path repository = Files.createDirectories(this.fixtures.resolve("acme").resolve(name));
 		for (Map.Entry<String, String> file : files.entrySet()) {
 			Path target = repository.resolve(file.getKey());
@@ -304,7 +308,7 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 		}
 		UUID projectId = createProject(createOrganization(), name);
 		UUID scanId = UUID.fromString(json(requestScan(projectId, randomSha(), null)).get("id").asString());
-		this.lifecycle.planJob(scanId, ScannerType.GITLEAKS);
+		this.lifecycle.planJob(scanId, scanner);
 		return scanId;
 	}
 
@@ -412,6 +416,104 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 		assertThat(document.get("finding_count").asInt()).isZero();
 		assertThat(document.at("/execution/status").asString()).isEqualTo("NO_FINDINGS");
 		assertThat(document.at("/input/files_scanned").asInt()).isEqualTo(2);
+		assertThat(sandboxes(jobId)).isEmpty();
+		assertCompletedButNeverPass(scanId);
+	}
+
+	// --- Semgrep (ADR-0011) -------------------------------------------------------------
+
+	private Map<String, String> semgrepWorker() {
+		Map<String, String> env = new HashMap<>();
+		env.put("SENTINEL_WORKER_FIXTURE_ENABLED", "false");
+		env.put("SENTINEL_WORKER_SEMGREP_ENABLED", "true");
+		env.put("SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR", this.fixtures.toAbsolutePath().toString());
+		return env;
+	}
+
+	private static final String PROPRIETARY_MARKER = "SENTINEL_PROPRIETARY_SOURCE_" + "E".repeat(24);
+
+	@Test
+	void semgrepReportsCodePatternsInEveryLanguageWithoutSourceExcerptsAndIsNeverPass() throws Exception {
+		String inName = syntheticToken('D');
+		UUID scanId = fixtureScan("sast-" + UUID.randomUUID().toString().substring(0, 8), Map.of(
+				"src/Users.java", """
+						import java.sql.*;
+						class Users {
+						  ResultSet find(Statement s, String id) throws Exception {
+						    return s.executeQuery("SELECT * FROM users WHERE id = " + id);
+						  }
+						}
+						""",
+				"app/handlers.py", "# " + PROPRIETARY_MARKER + "\nimport subprocess\n\ndef run(cmd):\n"
+						+ "    subprocess.run(cmd, shell=True)\n",
+				"web/server.js", "function handle(input) {\n  eval(input);\n}\n",
+				"web/client.ts", "export function handle(input: string, el: HTMLElement): void {\n"
+						+ "  el.innerHTML = input;\n}\n",
+				// Repository-controlled suppression must not hide findings.
+				".semgrepignore", "*\n",
+				"tests/test_app.py", "def t(x):\n    eval(x)  # nosemgrep\n",
+				"keys/" + inName + ".py", "eval(input())\n",
+				"README.md", "Synthetic test repository.\n"), ScannerType.SEMGREP);
+
+		String output = finish(startWorker(0, semgrepWorker(), "--idle-timeout", "3"));
+
+		assertThat(output).contains("scanner.completed").doesNotContain(PROPRIETARY_MARKER).doesNotContain(inName);
+		UUID jobId = this.jdbcTemplate.queryForObject("SELECT id FROM scan_jobs WHERE scan_id = ?", UUID.class,
+				scanId);
+		JsonNode document = findings(jobId);
+		assertThat(document.toString()).doesNotContain(PROPRIETARY_MARKER).doesNotContain(inName);
+		assertThat(document.at("/scanner/name").asString()).isEqualTo("semgrep");
+		assertThat(document.at("/scanner/version").asString()).isEqualTo("1.179.0");
+		assertThat(document.at("/execution/exit_code").asInt()).isEqualTo(41);
+		assertThat(document.at("/input/skipped/suppression_file").asInt()).isEqualTo(1);
+		assertThat(document.at("/coverage/files_supported").asInt()).isEqualTo(6);
+		assertThat(document.at("/coverage/files_analyzed").asInt()).isEqualTo(6);
+		assertThat(document.at("/coverage/files_unsupported").asInt()).isEqualTo(1);
+		List<String> located = new java.util.ArrayList<>();
+		for (JsonNode finding : document.get("findings")) {
+			located.add(finding.at("/location/path").asString() + ":" + finding.get("rule_id").asString());
+			assertThat(finding.get("category").asString()).isEqualTo("CODE_PATTERN");
+			assertThat(finding.at("/evidence/excerpt").isNull()).isTrue();
+			assertThat(finding.get("severity").isNull()).as("not mapped onto a normalized scale").isTrue();
+			assertThat(finding.get("scanner_severity").asString()).isIn("ERROR", "WARNING");
+			assertThat(finding.at("/classification/cwe/0").asString()).startsWith("CWE-");
+		}
+		assertThat(located).containsExactlyInAnyOrder(
+				"src/Users.java:sentinelpipe.java.sql-injection-string-concatenation",
+				"app/handlers.py:sentinelpipe.python.command-injection-shell",
+				"web/server.js:sentinelpipe.javascript.code-injection-eval",
+				"web/client.ts:sentinelpipe.javascript.dom-xss-inner-html",
+				"tests/test_app.py:sentinelpipe.python.code-injection-eval",
+				"keys/[redacted-1]:sentinelpipe.python.code-injection-eval");
+		for (String sensitive : List.of(PROPRIETARY_MARKER, inName)) {
+			assertThat(this.jdbcTemplate.queryForObject(
+					"SELECT (SELECT count(*) FROM evidence.objects WHERE position(? IN content) > 0)"
+							+ " + (SELECT count(*) FROM lifecycle.job_reports WHERE position(? IN result::text) > 0)"
+							+ " + (SELECT count(*) FROM lifecycle.execution_events e"
+							+ " WHERE position(? IN row_to_json(e)::text) > 0)",
+					Integer.class, sensitive.getBytes(StandardCharsets.UTF_8), sensitive, sensitive))
+				.isZero();
+		}
+		assertThat(sandboxes(jobId)).isEmpty();
+		// Code patterns are not proof of exploitability and not a decision: INCOMPLETE until M4.
+		assertCompletedButNeverPass(scanId);
+	}
+
+	@Test
+	void aCleanSemgrepScanIsNeverPass() throws Exception {
+		UUID scanId = fixtureScan("sast-clean-" + UUID.randomUUID().toString().substring(0, 8),
+				Map.of("app.py", "import hashlib\n\ndef h(b):\n    return hashlib.sha256(b).hexdigest()\n",
+						"web/app.ts", "export const add = (a: number, b: number): number => a + b;\n"),
+				ScannerType.SEMGREP);
+
+		finish(startWorker(0, semgrepWorker(), "--idle-timeout", "3"));
+
+		UUID jobId = this.jdbcTemplate.queryForObject("SELECT id FROM scan_jobs WHERE scan_id = ?", UUID.class,
+				scanId);
+		JsonNode document = findings(jobId);
+		assertThat(document.get("finding_count").asInt()).isZero();
+		assertThat(document.at("/execution/status").asString()).isEqualTo("NO_FINDINGS");
+		assertThat(document.at("/coverage/complete").asBoolean()).isTrue();
 		assertThat(sandboxes(jobId)).isEmpty();
 		assertCompletedButNeverPass(scanId);
 	}

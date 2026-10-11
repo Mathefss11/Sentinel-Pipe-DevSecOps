@@ -111,8 +111,9 @@ sentinel:
   execution:
     # Harmless FIXTURE scanner for development, CI and tests. Refused under prod profiles.
     fixture-enabled: false
-    # Jobs planned automatically for each new scan: FIXTURE and/or GITLEAKS (GITLEAKS scans
-    # local synthetic repositories only and is refused under production profiles).
+    # Jobs planned automatically for each new scan: FIXTURE, GITLEAKS and/or SEMGREP
+    # (GITLEAKS and SEMGREP scan local synthetic repositories only and are refused under
+    # production profiles).
     planned-scanners: []
     lease-duration: 60s
     execution-timeout: 15m

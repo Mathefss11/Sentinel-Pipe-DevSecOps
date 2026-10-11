@@ -1,6 +1,8 @@
 # Scanner adapters
 
-Decision record: [ADR-0010](../adr/0010-scanner-adapters-repository-snapshots-and-findings.md).
+Decision records: [ADR-0010](../adr/0010-scanner-adapters-repository-snapshots-and-findings.md)
+(architecture, Gitleaks), [ADR-0011](../adr/0011-semgrep-sast-with-a-bundled-ruleset.md)
+(Semgrep).
 Execution lifecycle: [execution-lifecycle.md](execution-lifecycle.md).
 
 ## Flow of one scanner job
@@ -11,6 +13,7 @@ worker.claim_job ─▶ JobLease (authoritative repository, commit, tenant)
    ▼
 ScannerExecutor.execute(lease, stop)
    ├─ RepositorySource.snapshot(lease)     validated, bounded, immutable RepositorySnapshot
+   ├─ adapter.prepare(snapshot)             minus scanner control files (e.g. .semgrepignore)
    ├─ adapter.stdin(snapshot)               deterministic tar (repo/ + worker ruleset + path manifest)
    ├─ adapter.command(snapshot)             constant script, validated integer arguments
    ├─ DockerSandbox.run(argv, stop, stdin)  fresh hardened container, killed on cancel/lease loss
@@ -36,7 +39,23 @@ ExecutionLoop: worker.put_evidence(findings.json) ─▶ worker.submit_result(jo
 | `sentinel_worker/scanners/gitleaks.py` | The Gitleaks adapter (image, policy, script, exit codes, parsers) |
 | `sentinel_worker/scanners/gitleaks-rules.toml` | Derived, pinned Gitleaks ruleset without path allowlists (`scripts/dev/derive-gitleaks-rules.py`) |
 | `sentinel_worker/scanners/paths.py` | Safe representation of repository paths (redaction labels) |
+| `sentinel_worker/scanners/sandbox_input.py` | Shared script fragment: archive staging, listing checks, extraction, count and digest verification; shared exit codes; strict JSON loading |
+| `sentinel_worker/scanners/semgrep.py` | The Semgrep adapter (image, policy, ruleset catalog and validation, script, exit codes, parser, coverage cross-check) |
+| `sentinel_worker/scanners/semgrep-rules.json` | Bundled, reviewed Semgrep ruleset, pinned by SHA-256 |
 | `sentinel_worker/sandbox/policy.py` | Image allowlist, stdin limit, runtime arguments (`--interactive` only when allowed) |
+
+## The two adapters compared
+
+| | Gitleaks | Semgrep |
+|---|---|---|
+| What it reports | Secrets (`SECRET`) | Code patterns (`CODE_PATTERN`); not proof of exploitability |
+| Ruleset | Upstream default, derived without path allowlists | Authored here, 13 rules, validated catalog |
+| Repository control files removed | Root `.gitleaksignore` | Every `.semgrepignore` |
+| Extra input | Path manifest (detects secrets in names) | None |
+| Text from scanner output | Description sanitized, then kept | Never kept: catalog only |
+| Coverage | Snapshot skips | Snapshot skips plus per-language analysis cross-check |
+| Success exit codes | 0, 41, 42, 43 | 0, 41 |
+| Limits | 512 MiB, 128 PIDs, 96 MiB tmpfs | 1 GiB (256 MiB per file), 64 PIDs, 128 MiB tmpfs (measured) |
 
 ## Adding a scanner (checklist)
 
@@ -53,7 +72,12 @@ ExecutionLoop: worker.put_evidence(findings.json) ─▶ worker.submit_result(jo
      offline or behind an explicit allowlist;
    - **built-in allowlists or exclusions keyed on file names** (a repository author
      controls names, so these are suppression mechanisms);
-   - whether its reports can carry file names, which must go through safe paths.
+   - whether its reports can carry file names, which must go through safe paths;
+   - whether its output can carry **source text** (interpolated messages, matched lines);
+     if so, take such fields from a trusted catalog or omit them;
+   - which files it analyzes, and how it reports skipped or partly parsed files, so that
+     coverage can be cross-checked;
+   - environment variables declared by its image (pin them in `IMAGE_ENVIRONMENT`).
 3. **Write the adapter:**
    - a sandbox policy within the global bounds;
    - a constant command;

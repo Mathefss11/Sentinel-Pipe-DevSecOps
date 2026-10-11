@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sandbox_check.add_argument(
         "--profile",
-        choices=("fixture", "gitleaks"),
+        choices=("fixture", "gitleaks", "semgrep"),
         default="fixture",
         help="Sandbox image and limits to verify (default: fixture).",
     )
@@ -167,7 +167,6 @@ def _execute(args: argparse.Namespace) -> int:
     from sentinel_worker.repository.snapshot import LocalFixtureRepositorySource
     from sentinel_worker.sandbox.docker import DockerCli, DockerSandbox, SandboxError
     from sentinel_worker.scanners.executor import DispatchingExecutor, ScannerExecutor
-    from sentinel_worker.scanners.gitleaks import GitleaksAdapter
 
     try:
         worker_settings = WorkerSettings.from_env()
@@ -193,22 +192,29 @@ def _execute(args: argparse.Namespace) -> int:
             )
         elif settings.fixture_enabled:
             executors.append(FixtureExecutor(settings.fixture_seconds))
-        if settings.gitleaks_enabled:
+        # Adapters are imported only when enabled: the Semgrep module verifies its bundled
+        # ruleset on import, which must not affect workers that do not run Semgrep.
+        scanners = (
+            (settings.gitleaks_enabled, settings.gitleaks_policy, "gitleaks"),
+            (settings.semgrep_enabled, settings.semgrep_policy, "semgrep"),
+        )
+        for enabled, scanner_policy, scanner_name in scanners:
+            if not enabled:
+                continue
+            adapter = _adapter(scanner_name)
             if (
                 settings.docker_cli is None
-                or settings.gitleaks_policy is None
+                or scanner_policy is None
                 or settings.repository_fixtures_dir is None
             ):  # pragma: no cover - guaranteed by settings
-                raise AssertionError("gitleaks settings missing")
-            scanner_sandbox = DockerSandbox(
-                DockerCli(settings.docker_cli), settings.gitleaks_policy
-            )
+                raise AssertionError("scanner settings missing")
+            scanner_sandbox = DockerSandbox(DockerCli(settings.docker_cli), scanner_policy)
             scanner_sandbox.check()
             scanner_sandbox.reap_expired()
             executors.append(
                 ScannerExecutor(
                     scanner_sandbox,
-                    GitleaksAdapter(),
+                    adapter,
                     LocalFixtureRepositorySource(settings.repository_fixtures_dir),
                 )
             )
@@ -246,9 +252,20 @@ def _execute(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _adapter(name: str) -> Any:
+    if name == "gitleaks":
+        from sentinel_worker.scanners.gitleaks import GitleaksAdapter
+
+        return GitleaksAdapter()
+    from sentinel_worker.scanners.semgrep import SemgrepAdapter
+
+    return SemgrepAdapter()
+
+
 def _sandbox_check(profile: str = "fixture") -> int:
     """Runs the isolation probe in a real sandbox and verifies every control. The
-    ``gitleaks`` profile runs it with the Gitleaks image and limits (BusyBox userland)."""
+    ``gitleaks`` and ``semgrep`` profiles run it with that scanner's image and limits (both
+    have a BusyBox userland)."""
     import threading
 
     from sentinel_worker.execution.settings import _docker_cli
@@ -256,12 +273,14 @@ def _sandbox_check(profile: str = "fixture") -> int:
     from sentinel_worker.sandbox.isolation import probe_command, verify
     from sentinel_worker.sandbox.policy import SandboxPolicy
     from sentinel_worker.scanners.gitleaks import GitleaksAdapter
+    from sentinel_worker.scanners.semgrep import SemgrepAdapter
 
-    policy = (
-        GitleaksAdapter().policy(timeout_seconds=60)
-        if profile == "gitleaks"
-        else SandboxPolicy(timeout_seconds=60)
-    )
+    profiles = {
+        "fixture": lambda: SandboxPolicy(timeout_seconds=60),
+        "gitleaks": lambda: GitleaksAdapter().policy(timeout_seconds=60),
+        "semgrep": lambda: SemgrepAdapter().policy(timeout_seconds=60),
+    }
+    policy = profiles[profile]()
     try:
         sandbox = DockerSandbox(DockerCli(_docker_cli(os.environ)), policy)
         sandbox.check()

@@ -1,0 +1,605 @@
+{
+  "rules": [
+    {
+      "id": "sentinelpipe.java.sql-injection-string-concatenation",
+      "languages": [
+        "java"
+      ],
+      "severity": "ERROR",
+      "message": "A SQL statement is built by string concatenation and executed. Use a PreparedStatement with bound parameters.",
+      "metadata": {
+        "cwe": [
+          "CWE-89"
+        ],
+        "owasp": [
+          "A03:2021"
+        ]
+      },
+      "patterns": [
+        {
+          "pattern-either": [
+            {
+              "pattern": "$STMT.$EXEC(\"...\" + $X, ...)"
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "String $Q = \"...\" + $X;\n...\n"
+                },
+                {
+                  "pattern": "$STMT.$EXEC($Q, ...)"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "metavariable-regex": {
+            "metavariable": "$EXEC",
+            "regex": "^(executeQuery|executeUpdate|execute|executeLargeUpdate|addBatch|prepareStatement)$"
+          }
+        },
+        {
+          "pattern-not": "$STMT.$EXEC(\"...\" + \"...\", ...)"
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.java.command-injection-runtime-exec",
+      "languages": [
+        "java"
+      ],
+      "severity": "ERROR",
+      "message": "A non-constant command is executed through Runtime.exec or a shell. Avoid shells and pass fixed program names with validated arguments.",
+      "metadata": {
+        "cwe": [
+          "CWE-78"
+        ],
+        "owasp": [
+          "A03:2021"
+        ]
+      },
+      "pattern-either": [
+        {
+          "patterns": [
+            {
+              "pattern": "Runtime.getRuntime().exec($CMD, ...)"
+            },
+            {
+              "pattern-not": "Runtime.getRuntime().exec(\"...\", ...)"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "new ProcessBuilder(..., \"-c\", $CMD, ...)"
+            },
+            {
+              "pattern-not": "new ProcessBuilder(..., \"-c\", \"...\", ...)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.java.insecure-deserialization",
+      "languages": [
+        "java"
+      ],
+      "severity": "WARNING",
+      "message": "Java native deserialization (ObjectInputStream) of data that may be untrusted can lead to remote code execution. Prefer a data-only format or a strict class filter.",
+      "metadata": {
+        "cwe": [
+          "CWE-502"
+        ],
+        "owasp": [
+          "A08:2021"
+        ]
+      },
+      "pattern-either": [
+        {
+          "pattern": "new ObjectInputStream(...)"
+        },
+        {
+          "pattern": "new java.io.ObjectInputStream(...)"
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.java.weak-hash-algorithm",
+      "languages": [
+        "java"
+      ],
+      "severity": "WARNING",
+      "message": "A broken hash algorithm (MD2, MD4, MD5 or SHA-1) is requested. Use SHA-256 or stronger, and a dedicated password hashing function for passwords.",
+      "metadata": {
+        "cwe": [
+          "CWE-328"
+        ],
+        "owasp": [
+          "A02:2021"
+        ]
+      },
+      "patterns": [
+        {
+          "pattern-either": [
+            {
+              "pattern": "MessageDigest.getInstance(\"$ALG\", ...)"
+            },
+            {
+              "pattern": "java.security.MessageDigest.getInstance(\"$ALG\", ...)"
+            }
+          ]
+        },
+        {
+          "metavariable-regex": {
+            "metavariable": "$ALG",
+            "regex": "(?i)^(md2|md4|md5|sha-?1)$"
+          }
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.python.command-injection-shell",
+      "languages": [
+        "python"
+      ],
+      "severity": "ERROR",
+      "message": "A command is run through a shell (shell=True or os.system) with a non-constant command. Pass an argument list without a shell.",
+      "metadata": {
+        "cwe": [
+          "CWE-78"
+        ],
+        "owasp": [
+          "A03:2021"
+        ]
+      },
+      "pattern-either": [
+        {
+          "patterns": [
+            {
+              "pattern": "subprocess.$FUNC($CMD, ..., shell=True, ...)"
+            },
+            {
+              "pattern-not": "subprocess.$FUNC(\"...\", ..., shell=True, ...)"
+            },
+            {
+              "metavariable-regex": {
+                "metavariable": "$FUNC",
+                "regex": "^(run|call|check_call|check_output|Popen|getoutput|getstatusoutput)$"
+              }
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern-either": [
+                {
+                  "pattern": "os.system($CMD)"
+                },
+                {
+                  "pattern": "os.popen($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "pattern-not": "os.system(\"...\")"
+            },
+            {
+              "pattern-not": "os.popen(\"...\", ...)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.python.code-injection-eval",
+      "languages": [
+        "python"
+      ],
+      "severity": "ERROR",
+      "message": "eval or exec is called with a non-constant argument, which executes arbitrary code if the argument is attacker-influenced. Use ast.literal_eval or explicit parsing.",
+      "metadata": {
+        "cwe": [
+          "CWE-95"
+        ],
+        "owasp": [
+          "A03:2021"
+        ]
+      },
+      "patterns": [
+        {
+          "pattern-either": [
+            {
+              "pattern": "eval($X, ...)"
+            },
+            {
+              "pattern": "exec($X, ...)"
+            }
+          ]
+        },
+        {
+          "pattern-not": "eval(\"...\", ...)"
+        },
+        {
+          "pattern-not": "exec(\"...\", ...)"
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.python.insecure-deserialization",
+      "languages": [
+        "python"
+      ],
+      "severity": "ERROR",
+      "message": "pickle, marshal or yaml.load without a safe loader deserializes data in a way that can execute code. Use a data-only format or yaml.safe_load.",
+      "metadata": {
+        "cwe": [
+          "CWE-502"
+        ],
+        "owasp": [
+          "A08:2021"
+        ]
+      },
+      "pattern-either": [
+        {
+          "pattern": "pickle.loads(...)"
+        },
+        {
+          "pattern": "pickle.load(...)"
+        },
+        {
+          "pattern": "marshal.loads(...)"
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "yaml.load(...)"
+            },
+            {
+              "pattern-not": "yaml.load(..., Loader=yaml.SafeLoader, ...)"
+            },
+            {
+              "pattern-not": "yaml.load(..., Loader=yaml.CSafeLoader, ...)"
+            },
+            {
+              "pattern-not": "yaml.load(..., Loader=SafeLoader, ...)"
+            },
+            {
+              "pattern-not": "yaml.load($DATA, yaml.SafeLoader)"
+            },
+            {
+              "pattern-not": "yaml.load($DATA, yaml.CSafeLoader)"
+            },
+            {
+              "pattern-not": "yaml.load($DATA, SafeLoader)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.python.sql-injection-string-formatting",
+      "languages": [
+        "python"
+      ],
+      "severity": "ERROR",
+      "message": "A SQL statement is built with string formatting or concatenation and executed. Use parameterized queries with placeholders.",
+      "metadata": {
+        "cwe": [
+          "CWE-89"
+        ],
+        "owasp": [
+          "A03:2021"
+        ]
+      },
+      "pattern-either": [
+        {
+          "pattern": "$CUR.execute(\"...\" % $X, ...)"
+        },
+        {
+          "pattern": "$CUR.execute(\"...\" + $X, ...)"
+        },
+        {
+          "pattern": "$CUR.execute(\"...\".format(...), ...)"
+        },
+        {
+          "pattern": "$CUR.execute(f\"...\", ...)"
+        },
+        {
+          "pattern": "$CUR.executemany(\"...\" % $X, ...)"
+        },
+        {
+          "pattern": "$CUR.executemany(f\"...\", ...)"
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.python.weak-hash-algorithm",
+      "languages": [
+        "python"
+      ],
+      "severity": "WARNING",
+      "message": "A broken hash algorithm (MD5 or SHA-1) is used. Use SHA-256 or stronger, or pass usedforsecurity=False for non-security checksums.",
+      "metadata": {
+        "cwe": [
+          "CWE-328"
+        ],
+        "owasp": [
+          "A02:2021"
+        ]
+      },
+      "patterns": [
+        {
+          "pattern-either": [
+            {
+              "pattern": "hashlib.md5(...)"
+            },
+            {
+              "pattern": "hashlib.sha1(...)"
+            }
+          ]
+        },
+        {
+          "pattern-not": "hashlib.$H(..., usedforsecurity=False, ...)"
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.javascript.code-injection-eval",
+      "languages": [
+        "javascript",
+        "typescript"
+      ],
+      "severity": "ERROR",
+      "message": "eval or the Function constructor is called with a non-constant argument, which executes arbitrary code if the argument is attacker-influenced.",
+      "metadata": {
+        "cwe": [
+          "CWE-95"
+        ],
+        "owasp": [
+          "A03:2021"
+        ]
+      },
+      "pattern-either": [
+        {
+          "patterns": [
+            {
+              "pattern": "eval($X)"
+            },
+            {
+              "pattern-not": "eval(\"...\")"
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "new Function(..., $BODY)"
+            },
+            {
+              "pattern-not": "new Function(..., \"...\")"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.javascript.command-injection-child-process",
+      "languages": [
+        "javascript",
+        "typescript"
+      ],
+      "severity": "ERROR",
+      "message": "A non-constant command is passed to child_process exec or execSync, which runs it through a shell. Use execFile or spawn with an argument array.",
+      "metadata": {
+        "cwe": [
+          "CWE-78"
+        ],
+        "owasp": [
+          "A03:2021"
+        ]
+      },
+      "patterns": [
+        {
+          "pattern-either": [
+            {
+              "pattern": "require(\"child_process\").$EXEC($CMD, ...)"
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "$CP = require(\"child_process\");\n...\n"
+                },
+                {
+                  "pattern": "$CP.$EXEC($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "import $CP from \"child_process\";\n...\n"
+                },
+                {
+                  "pattern": "$CP.$EXEC($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "import * as $CP from \"child_process\";\n...\n"
+                },
+                {
+                  "pattern": "$CP.$EXEC($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "import { ..., $EXEC, ... } from \"child_process\";\n...\n"
+                },
+                {
+                  "pattern": "$EXEC($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "const { ..., $EXEC, ... } = require(\"child_process\");\n...\n"
+                },
+                {
+                  "pattern": "$EXEC($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "pattern": "require(\"node:child_process\").$EXEC($CMD, ...)"
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "$CP = require(\"node:child_process\");\n...\n"
+                },
+                {
+                  "pattern": "$CP.$EXEC($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "import $CP from \"node:child_process\";\n...\n"
+                },
+                {
+                  "pattern": "$CP.$EXEC($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "import * as $CP from \"node:child_process\";\n...\n"
+                },
+                {
+                  "pattern": "$CP.$EXEC($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "import { ..., $EXEC, ... } from \"node:child_process\";\n...\n"
+                },
+                {
+                  "pattern": "$EXEC($CMD, ...)"
+                }
+              ]
+            },
+            {
+              "patterns": [
+                {
+                  "pattern-inside": "const { ..., $EXEC, ... } = require(\"node:child_process\");\n...\n"
+                },
+                {
+                  "pattern": "$EXEC($CMD, ...)"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "metavariable-regex": {
+            "metavariable": "$EXEC",
+            "regex": "^(exec|execSync)$"
+          }
+        },
+        {
+          "pattern-not": "$OBJ.$EXEC(\"...\", ...)"
+        },
+        {
+          "pattern-not": "$EXEC(\"...\", ...)"
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.javascript.dom-xss-inner-html",
+      "languages": [
+        "javascript",
+        "typescript"
+      ],
+      "severity": "WARNING",
+      "message": "Non-constant data is written to innerHTML, outerHTML or document.write, which can lead to cross-site scripting. Use textContent or a vetted sanitizer.",
+      "metadata": {
+        "cwe": [
+          "CWE-79"
+        ],
+        "owasp": [
+          "A03:2021"
+        ]
+      },
+      "pattern-either": [
+        {
+          "patterns": [
+            {
+              "pattern-either": [
+                {
+                  "pattern": "$EL.innerHTML = $X"
+                },
+                {
+                  "pattern": "$EL.outerHTML = $X"
+                }
+              ]
+            },
+            {
+              "pattern-not": "$EL.$P = \"...\""
+            }
+          ]
+        },
+        {
+          "patterns": [
+            {
+              "pattern": "document.write($X)"
+            },
+            {
+              "pattern-not": "document.write(\"...\")"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sentinelpipe.javascript.weak-hash-algorithm",
+      "languages": [
+        "javascript",
+        "typescript"
+      ],
+      "severity": "WARNING",
+      "message": "A broken hash algorithm (MD5 or SHA-1) is requested from the crypto module. Use SHA-256 or stronger.",
+      "metadata": {
+        "cwe": [
+          "CWE-328"
+        ],
+        "owasp": [
+          "A02:2021"
+        ]
+      },
+      "patterns": [
+        {
+          "pattern": "$CRYPTO.createHash(\"$ALG\")"
+        },
+        {
+          "metavariable-regex": {
+            "metavariable": "$ALG",
+            "regex": "(?i)^(md5|sha1)$"
+          }
+        }
+      ]
+    }
+  ]
+}

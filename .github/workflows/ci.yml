@@ -190,14 +190,15 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # The sandbox images must match FIXTURE_IMAGE and GITLEAKS_IMAGE in
-      # sentinel_worker/sandbox/policy.py (Gitleaks from ghcr.io, anonymous, by digest). Workers
-      # never pull at execution time (--pull never).
+      # The sandbox images must match FIXTURE_IMAGE, GITLEAKS_IMAGE and SEMGREP_IMAGE in
+      # sentinel_worker/sandbox/policy.py (Gitleaks from ghcr.io, Semgrep from Docker Hub; by
+      # digest). Workers never pull at execution time (--pull never).
       - name: Pre-pull sandbox and Testcontainers images
         run: >-
           sh "$GITHUB_WORKSPACE/scripts/ci/pull-images.sh"
           alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
           ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b
           postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
           rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
 
@@ -214,9 +215,14 @@ jobs:
       - name: Sandbox self-check (Gitleaks profile)
         run: sentinel-worker sandbox-check --profile gitleaks
 
+      # The same controls under the Semgrep image and limits (ADR-0011).
+      - name: Sandbox self-check (Semgrep profile)
+        run: sentinel-worker sandbox-check --profile semgrep
+
       # Isolation, limits, timeouts, cancellation, cleanup and crash recovery, plus the full
-      # protocol with PostgreSQL; real Gitleaks scans of synthetic repositories, including
-      # symlink escapes (POSIX only). A missing runtime or image fails instead of skipping.
+      # protocol with PostgreSQL; real Gitleaks and Semgrep scans of synthetic repositories,
+      # including symlink escapes (POSIX only). A missing runtime or image fails instead of
+      # skipping.
       - name: Sandbox tests
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
@@ -273,9 +279,9 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Must match TestcontainersConfiguration.java; the alpine and Gitleaks images are the
-      # worker's sandbox images (sentinel_worker/sandbox/policy.py). Every CI image is pinned
-      # by digest.
+      # Must match TestcontainersConfiguration.java; the alpine, Gitleaks and Semgrep images
+      # are the worker's sandbox images (sentinel_worker/sandbox/policy.py). Every CI image is
+      # pinned by digest.
       - name: Pre-pull Testcontainers and sandbox images
         run: >-
           sh scripts/ci/pull-images.sh
@@ -283,6 +289,7 @@ jobs:
           rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
           alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
           ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b
 
       - name: Log out of Docker Hub
         if: always()
@@ -291,8 +298,8 @@ jobs:
       # Java scan creation, outbox publication with confirms, RabbitMQ delivery, and the real
       # Python worker process recording its receipt in PostgreSQL, verified against the
       # outbox (ScanDeliveryE2ETests); forged messages and an audited operator DLQ replay;
-      # sandboxed execution, cancellation, crash recovery and Gitleaks scans of synthetic
-      # repositories with redacted findings (ScanExecutionE2ETests).
+      # sandboxed execution, cancellation, crash recovery, and Gitleaks and Semgrep scans of
+      # synthetic repositories with redacted findings (ScanExecutionE2ETests).
       # The e2e profile sets failIfNoTests, so this step fails if no E2E test runs.
       - name: Run end-to-end tests
         working-directory: services/sentinel-api
