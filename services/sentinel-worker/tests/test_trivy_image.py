@@ -771,3 +771,112 @@ def test_the_image_stream_reaches_a_real_process() -> None:
             )
 
     trivy_image._load(Cli(), lambda sink: sink.write(b"x" * 70000))  # type: ignore[arg-type]
+
+
+# --- The archive docker load receives (GitHub Actions run #12) ---------------------------------
+
+
+def test_the_docker_archive_manifest_names_the_config_and_every_layer() -> None:
+    config = "sha256:" + "c" * 64
+    layers = ["sha256:" + "1" * 64, "sha256:" + "2" * 64]
+
+    manifest = json.loads(
+        trivy_image.docker_archive_manifest("sentinelpipe-local/trivy-db:t", config, layers)
+    )
+
+    assert manifest == [
+        {
+            "Config": "blobs/sha256/" + "c" * 64,
+            "RepoTags": ["sentinelpipe-local/trivy-db:t"],
+            "Layers": ["blobs/sha256/" + "1" * 64, "blobs/sha256/" + "2" * 64],
+        }
+    ]
+
+
+class _CapturingLoad(_PosixLoad):
+    """Keeps the streamed archive (the stream is closed by communicate())."""
+
+    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+        self.stdin.flush()
+        self.received = self.stdin.getvalue()
+        return b"", b""
+
+
+class _BuildDocker:
+    def __init__(self) -> None:
+        self.load = _CapturingLoad()
+
+    def start(self, arguments: list[str], stdin: bool = False) -> Any:
+        assert arguments == ["image", "load", "--quiet"]
+        return self.load
+
+    def call(self, arguments: list[str], timeout: float = 30) -> subprocess.CompletedProcess[bytes]:
+        # Stop after loading: this test is about the archive, not the verification.
+        return subprocess.CompletedProcess(arguments, 1, b"", b"")
+
+
+def test_the_archive_loads_on_the_classic_and_the_containerd_image_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression for CI run #12: the archive had only the OCI index. Docker 28's classic
+    # store (GitHub Ubuntu runners) requires manifest.json and otherwise fell back to the
+    # legacy format: "open .../repositories: no such file or directory". The containerd
+    # store reads index.json. Both must be present and agree.
+    base_layers = [gzip.compress(BASE_LAYER_A, mtime=0), BASE_LAYER_B]
+    export = trivy_image._Export()
+    for blob in base_layers:
+        export.blobs[sha(blob)] = trivy_image._Blob(digest=sha(blob), size=len(blob), content=blob)
+    base_manifest = {
+        "layers": [
+            {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                "digest": sha(b),
+                "size": len(b),
+            }
+            for b in base_layers
+        ]
+    }
+    monkeypatch.setattr(trivy_image, "_base_export", lambda docker: (export, base_manifest))
+    docker = _BuildDocker()
+
+    with pytest.raises(ImageError, match="LOAD_FAILED"):
+        trivy_image.build_image(docker, _database_dir(tmp_path))  # type: ignore[arg-type]
+
+    with tarfile.open(fileobj=io.BytesIO(docker.load.received)) as archive:
+        members = {m.name: archive.extractfile(m).read() for m in archive if m.isfile()}  # type: ignore[union-attr]
+    assert {"oci-layout", "index.json", "manifest.json"} <= set(members)
+    (entry,) = json.loads(members["manifest.json"])
+    index = json.loads(members["index.json"])
+    oci_manifest = json.loads(members["blobs/sha256/" + index["manifests"][0]["digest"][7:]])
+    assert entry["Config"] == "blobs/sha256/" + oci_manifest["config"]["digest"][7:]
+    assert entry["Layers"] == [
+        "blobs/sha256/" + layer["digest"][7:] for layer in oci_manifest["layers"]
+    ]
+    assert all(path in members for path in [entry["Config"], *entry["Layers"]])
+    assert entry["RepoTags"] == [
+        "sentinelpipe-local/trivy-db:"
+        + index["manifests"][0]["annotations"]["org.opencontainers.image.ref.name"]
+    ]
+    for path in entry["Layers"]:  # every blob is content-addressed
+        assert sha(members[path]) == "sha256:" + path.rsplit("/", 1)[1]
+
+
+def test_a_failed_load_reports_the_runtime_error_sanitized() -> None:
+    token = "ghp_" + "R" * 36
+
+    class Failing(_PosixLoad):
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            super().communicate(timeout)
+            return (
+                b"",
+                f"open /var/lib/docker/tmp/x/repositories: no such file\x1b[31m {token}".encode(),
+            )
+
+    with pytest.raises(ImageError) as raised:
+        trivy_image._load(_LoadDocker(Failing(returncode=1)), lambda sink: sink.write(b"x"))  # type: ignore[arg-type]
+
+    assert str(raised.value) == "LOAD_FAILED"
+    # The shared sanitizer also redacts long path-like runs; the error itself survives.
+    assert "no such file" in raised.value.detail
+    assert token not in raised.value.detail
+    assert "\x1b" not in raised.value.detail

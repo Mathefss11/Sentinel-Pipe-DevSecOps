@@ -68,7 +68,7 @@ from importlib import resources
 from pathlib import Path
 from typing import IO, Any
 
-from sentinel_worker.sandbox.docker import DockerCli
+from sentinel_worker.sandbox.docker import DockerCli, sanitize
 from sentinel_worker.sandbox.policy import TRIVY_BASE_IMAGE, register_verified_image
 
 #: Digest of the linux/amd64 image manifest in the pinned Trivy index (provenance chain:
@@ -126,11 +126,14 @@ _TAG = re.compile(r"[a-z0-9]{1,64}\Z")
 
 
 class ImageError(Exception):
-    """The image, its database or its lock cannot be trusted. ``code`` is sanitized."""
+    """The image, its database or its lock cannot be trusted. ``code`` is sanitized.
+    ``detail`` is an optional, sanitized and bounded excerpt of a container runtime error
+    for operator tooling (``trivy-image``); it is never part of ``str(exc)``."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(code)
         self.code = code
+        self.detail = detail
 
 
 def _require(condition: bool, code: str) -> None:
@@ -981,12 +984,30 @@ def _load(docker: DockerCli, write: Callable[[IO[bytes]], None]) -> None:
         raise ImageError("LOAD_FAILED")
     try:
         write(sink)
-        process.communicate(timeout=_SAVE_TIMEOUT)
+        _, errors = process.communicate(timeout=_SAVE_TIMEOUT)
     except BaseException:
         process.kill()
         process.wait()
         raise
-    _require(process.returncode == 0, "LOAD_FAILED")
+    if process.returncode != 0:
+        raise ImageError("LOAD_FAILED", sanitize(errors or b""))
+
+
+def docker_archive_manifest(name: str, config_digest: str, layers: Sequence[str]) -> bytes:
+    """The Docker archive ``manifest.json`` of the loaded image. Docker's classic image
+    store (the default on Docker Engine 28, as on the GitHub Ubuntu runners) loads only
+    archives with this file; without it, it falls back to the pre-1.10 format and fails
+    ("open .../repositories: no such file or directory", CI run #12). The containerd image
+    store reads ``index.json``. ``docker save`` writes both, and so does the builder."""
+    return _canonical(
+        [
+            {
+                "Config": f"blobs/sha256/{config_digest[len('sha256:') :]}",
+                "RepoTags": [name],
+                "Layers": [f"blobs/sha256/{digest[len('sha256:') :]}" for digest in layers],
+            }
+        ]
+    )
 
 
 def build_image(docker: DockerCli, directory: Path) -> ImageLock:
@@ -1067,6 +1088,12 @@ def build_image(docker: DockerCli, directory: Path) -> ImageLock:
                 out, f"blobs/sha256/{manifest_digest[7:]}", len(manifest), io.BytesIO(manifest)
             )
             _write_member(out, "index.json", len(index), io.BytesIO(index))
+            archive_manifest = docker_archive_manifest(
+                name,
+                config_digest,
+                [layer["digest"] for layer in base_manifest["layers"]] + [layer_digest],
+            )
+            _write_member(out, "manifest.json", len(archive_manifest), io.BytesIO(archive_manifest))
 
     _load(docker, write)
     inspected = docker.call(["image", "inspect", "--format", "{{.Id}}", name])

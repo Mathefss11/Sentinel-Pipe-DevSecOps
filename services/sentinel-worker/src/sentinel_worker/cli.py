@@ -479,7 +479,10 @@ def _trivy_image(args: argparse.Namespace) -> int:
             verified = load_and_verify(docker, args.lock)
             report = {"verified": True, "image_id": verified.image_id}
     except ImageError as exc:
-        print(json.dumps({"verified": False, "error": exc.code}, indent=2))
+        report = {"verified": False, "error": exc.code}
+        if exc.detail:
+            report["detail"] = exc.detail
+        print(json.dumps(report, indent=2))
         return EXIT_UNHEALTHY
     except (ConfigurationError, SandboxError, OSError) as exc:
         print(json.dumps({"verified": False, "error": type(exc).__name__}, indent=2))
