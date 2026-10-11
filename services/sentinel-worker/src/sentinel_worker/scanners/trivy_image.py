@@ -61,7 +61,7 @@ import struct
 import tarfile
 import threading
 import zlib
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import resources
@@ -968,6 +968,27 @@ def _write_member(archive: tarfile.TarFile, name: str, size: int, data: IO[bytes
     archive.addfile(info, data)
 
 
+def _load(docker: DockerCli, write: Callable[[IO[bytes]], None]) -> None:
+    """Streams an OCI layout into ``docker image load`` through ``write(stdin)``.
+
+    The pipe is left open for ``communicate()``, which flushes and closes it itself.
+    Closing it first worked on Windows but fails on Linux, where CPython's POSIX
+    ``communicate()`` starts by flushing stdin: "ValueError: flush of closed file"
+    (GitHub Actions run #11)."""
+    process = docker.start(["image", "load", "--quiet"], stdin=True)
+    sink = process.stdin
+    if sink is None:
+        raise ImageError("LOAD_FAILED")
+    try:
+        write(sink)
+        process.communicate(timeout=_SAVE_TIMEOUT)
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    _require(process.returncode == 0, "LOAD_FAILED")
+
+
 def build_image(docker: DockerCli, directory: Path) -> ImageLock:
     """Builds, loads and verifies the image for a prepared database directory and returns
     its lock. Requires the pinned base image locally (``docker pull`` by digest)."""
@@ -1016,11 +1037,8 @@ def build_image(docker: DockerCli, directory: Path) -> ImageLock:
             ],
         }
     )
-    process = docker.start(["image", "load", "--quiet"], stdin=True)
-    sink = process.stdin
-    if sink is None:
-        raise ImageError("LOAD_FAILED")
-    try:
+
+    def write(sink: IO[bytes]) -> None:
         with tarfile.open(fileobj=sink, mode="w|", format=tarfile.USTAR_FORMAT) as out:
             layout = b'{"imageLayoutVersion":"1.0.0"}'
             _write_member(out, "oci-layout", len(layout), io.BytesIO(layout))
@@ -1049,13 +1067,8 @@ def build_image(docker: DockerCli, directory: Path) -> ImageLock:
                 out, f"blobs/sha256/{manifest_digest[7:]}", len(manifest), io.BytesIO(manifest)
             )
             _write_member(out, "index.json", len(index), io.BytesIO(index))
-        sink.close()
-        process.communicate(timeout=_SAVE_TIMEOUT)
-    except BaseException:
-        process.kill()
-        process.wait()
-        raise
-    _require(process.returncode == 0, "LOAD_FAILED")
+
+    _load(docker, write)
     inspected = docker.call(["image", "inspect", "--format", "{{.Id}}", name])
     _require(inspected.returncode == 0, "LOAD_FAILED")
     image_id = inspected.stdout.decode("ascii", "replace").strip()

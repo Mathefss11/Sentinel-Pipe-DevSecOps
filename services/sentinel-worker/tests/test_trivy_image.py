@@ -15,6 +15,7 @@ import json
 import os
 import struct
 import subprocess
+import sys
 import tarfile
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -685,3 +686,88 @@ def test_verification_stops_the_export_when_interrupted(tmp_path: Path) -> None:
     with pytest.raises(KeyboardInterrupt):
         verify_image(Docker(image), image.lock, base_diff_ids=FAKE_BASE_DIFF_IDS)  # type: ignore[arg-type]
     assert killed == [True]
+
+
+# --- Loading the image (GitHub Actions run #11) -------------------------------------------------
+
+
+class _PosixLoad:
+    """A ``docker image load`` process with CPython's POSIX ``communicate()`` semantics:
+    it starts by flushing stdin, which raises on a pipe the caller already closed."""
+
+    def __init__(self, returncode: int = 0) -> None:
+        self.stdin = io.BytesIO()
+        self.received = b""
+        self.returncode = returncode
+        self.killed = False
+
+    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+        self.stdin.flush()  # ValueError: I/O operation on closed file, as on Linux
+        self.received = self.stdin.getvalue()
+        self.stdin.close()
+        return b"Loaded image\n", b""
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.returncode
+
+
+class _LoadDocker:
+    def __init__(self, process: Any) -> None:
+        self.process = process
+        self.arguments: list[str] = []
+
+    def start(self, arguments: list[str], stdin: bool = False) -> Any:
+        self.arguments = arguments
+        assert stdin
+        return self.process
+
+
+def test_the_image_stream_is_handed_to_docker_load_with_posix_semantics() -> None:
+    # Regression for CI run #11: build_image closed stdin before communicate(), which
+    # works on Windows but raises "flush of closed file" on Linux runners.
+    process = _PosixLoad()
+    docker = _LoadDocker(process)
+
+    trivy_image._load(docker, lambda sink: sink.write(b"oci-layout-bytes"))  # type: ignore[arg-type]
+
+    assert docker.arguments == ["image", "load", "--quiet"]
+    assert process.received == b"oci-layout-bytes"
+    assert process.stdin.closed
+    assert not process.killed
+
+
+def test_a_failed_load_or_writer_kills_docker_load() -> None:
+    failed = _PosixLoad(returncode=1)
+    with pytest.raises(ImageError, match="LOAD_FAILED"):
+        trivy_image._load(_LoadDocker(failed), lambda sink: sink.write(b"x"))  # type: ignore[arg-type]
+
+    interrupted = _PosixLoad()
+
+    def write(sink: Any) -> None:
+        raise ImageError("BASE_MISMATCH")
+
+    with pytest.raises(ImageError, match="BASE_MISMATCH"):
+        trivy_image._load(_LoadDocker(interrupted), write)  # type: ignore[arg-type]
+    assert interrupted.killed
+
+
+def test_the_image_stream_reaches_a_real_process() -> None:
+    # A real child process stands in for docker: on the Linux CI runners this exercises
+    # CPython's POSIX communicate() itself.
+    class Cli:
+        def start(self, arguments: list[str], stdin: bool = False) -> Any:
+            script = (
+                "import sys; data = sys.stdin.buffer.read(); "
+                "sys.exit(0 if data == b'x' * 70000 else 3)"
+            )
+            return subprocess.Popen(  # noqa: S603 - fixed interpreter and script
+                [sys.executable, "-I", "-c", script],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+    trivy_image._load(Cli(), lambda sink: sink.write(b"x" * 70000))  # type: ignore[arg-type]
