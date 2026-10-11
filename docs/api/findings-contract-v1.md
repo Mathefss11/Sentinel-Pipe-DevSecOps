@@ -3,8 +3,9 @@
 - **Schema:** [`packages/contracts/messages/v1/findings.v1.schema.json`](../../packages/contracts/messages/v1/findings.v1.schema.json)
   (JSON Schema 2020-12, `$id` `https://sentinelpipe.dev/schemas/messages/v1/findings.v1.schema.json`)
 - **Producers:** the worker, from one scanner run: Gitleaks
-  ([ADR-0010](../adr/0010-scanner-adapters-repository-snapshots-and-findings.md)) and
-  Semgrep ([ADR-0011](../adr/0011-semgrep-sast-with-a-bundled-ruleset.md))
+  ([ADR-0010](../adr/0010-scanner-adapters-repository-snapshots-and-findings.md)),
+  Semgrep ([ADR-0011](../adr/0011-semgrep-sast-with-a-bundled-ruleset.md)) and Trivy
+  ([ADR-0012](../adr/0012-trivy-sca-with-an-embedded-verified-database.md))
 - **Transport:** the evidence artifact `findings.json` (`application/json`) of a
   `job-result.v1` result. It is stored through `worker.put_evidence`: digest computed by
   PostgreSQL, tenant-scoped and bound to the lease (ADR-0008).
@@ -22,6 +23,10 @@
 - A `CODE_PATTERN` finding (Semgrep) means code matches a pattern associated with a
   vulnerability class. It does not prove that untrusted data reaches the code, that the
   code is reachable, or that it is exploitable.
+- A `DEPENDENCY_VULNERABILITY` finding (Trivy) means a declared dependency version lies in
+  the affected range of a published advisory **in the recorded, point-in-time database**
+  (`vulnerability_database`). It does not prove that the vulnerable code is used or
+  reachable, and advisories published after the database's `updated_at` are not covered.
 
 ## Structure
 
@@ -39,7 +44,9 @@
 | `coverage.complete` | `false` when scannable files were skipped, or (language-aware scanners) a supported file was not fully analyzed |
 | `coverage.files_supported`, `files_analyzed`, `files_not_analyzed`, `files_unsupported` | Optional (Semgrep): per-language coverage. A supported file missing from the scanner's list of analyzed files, with a parse error (from the scanner or an independent check), a timeout or memory error, or an unverifiable encoding counts as not analyzed |
 | `coverage.not_analyzed_reasons` | Optional (Semgrep): counts for `scanner_skipped`, `parse_error`, `resource_limit`, `unverifiable_encoding`; a file can count under several |
-| `coverage.limitations` | Subset of `FILES_SKIPPED`, `EMPTY_INPUT` (nothing was scanned), `COMMIT_NOT_VERIFIED`, `GIT_HISTORY_NOT_SCANNED`, `ARCHIVES_NOT_SCANNED`, `RULESET_DEFAULT_ONLY` (Gitleaks); `FILES_NOT_ANALYZED`, `UNSUPPORTED_FILES_PRESENT`, `NO_SUPPORTED_FILES`, `RULESET_MINIMAL`, `PATTERN_MATCHING_ONLY`, `PARSE_COMPLETENESS_UNVERIFIED` (Semgrep: "analyzed" means the scanner reported no problem, not that every construct was parsed) |
+| `coverage.dependencies` | Optional (Trivy): counts only, never names: `packages`, `packages_unresolved` (non-root packages whose version cannot be compared: missing, an unresolved property, or outside SemVer for npm and PEP 440 for PyPI), `packages_development`, `manifests_partial` (`pom.xml`, `requirements.txt`), `manifests_lockfile_missing`, `unsupported_dependency_files`, `binary_artifacts` |
+| `coverage.limitations` | Subset of `FILES_SKIPPED`, `EMPTY_INPUT` (nothing was scanned), `COMMIT_NOT_VERIFIED`, `GIT_HISTORY_NOT_SCANNED`, `ARCHIVES_NOT_SCANNED`, `RULESET_DEFAULT_ONLY` (Gitleaks); `FILES_NOT_ANALYZED`, `UNSUPPORTED_FILES_PRESENT`, `NO_SUPPORTED_FILES`, `RULESET_MINIMAL`, `PATTERN_MATCHING_ONLY`, `PARSE_COMPLETENESS_UNVERIFIED` (Semgrep: "analyzed" means the scanner reported no problem, not that every construct was parsed); `ADVISORY_DATA_POINT_IN_TIME`, `REACHABILITY_NOT_ANALYZED`, `VULNERABILITY_DB_STALE`, `SYNTHETIC_VULNERABILITY_DATABASE`, `PARTIAL_DEPENDENCY_RESOLUTION`, `UNRESOLVED_DEPENDENCY_VERSIONS`, `DEPENDENCY_LOCKFILE_MISSING`, `UNSUPPORTED_DEPENDENCY_FORMATS_PRESENT`, `BINARY_ARTIFACTS_NOT_ANALYZED`, `PACKAGE_VALUES_REDACTED`, `PYPI_NAME_MATCHING_UNVERIFIED`, `DEVELOPMENT_DEPENDENCIES_NOT_ANALYZED` (Trivy: a manifest is "analyzed" when Trivy returned a result for it, which is not the same as complete resolution) |
+| `vulnerability_database` | Optional (Trivy): `schema_version` (2), `updated_at`, `next_update`, `age_seconds` at scan time, `freshness` (`FRESH` ≤ 48 h, `STALE` ≤ 7 days; older databases fail the scan), `trivy_db_sha256`, `metadata_sha256`, `source` (`UPSTREAM_OCI` with repository, manifest and blob digests, or `SYNTHETIC_FIXTURE` with builder and advisory digest) and `image` (configuration digest and image id of the verified local image) |
 | `execution` | `status` (`NO_FINDINGS` / `FINDINGS_DETECTED`), the script's `exit_code` (Gitleaks: 0, 41 content, 42 file names, 43 both; Semgrep: 0, 41), and `raw_report_sha256`: the digest of the native report(s) actually observed, which are parsed but not stored. It identifies that report; it is **not** reproducible across runs (both scanners' reports vary in ordering or timing) |
 | `finding_count` | Number of distinct findings (≤ 1000) |
 | `findings[]` | See below; sorted by path, start line, start column, rule id, fingerprint |
@@ -52,14 +59,16 @@
 | `fingerprint` | SHA-256 of the canonical JSON array `["sentinelpipe.finding.v1", scanner, rule_id, target, safe path, start_line, end_line, start_column, end_column]` | ✓ |
 | `scanner` | `name`, `version` | ✓ |
 | `rule_id` | Scanner rule (`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`) | e.g. `github-pat` |
-| `category` | `SECRET` (Gitleaks) or `CODE_PATTERN` (Semgrep) | `SECRET` |
+| `category` | `SECRET` (Gitleaks), `CODE_PATTERN` (Semgrep) or `DEPENDENCY_VULNERABILITY` (Trivy; `rule_id` is then the advisory id, CVE or GHSA) | `SECRET` |
 | `description` | Scanner-provided, sanitized, ≤ 512 characters, or `null` | Rule description |
-| `location` | `target` (`FILE_CONTENT` or `FILE_PATH`); `path`, the **safe** relative POSIX path of a snapshot file (redacted components appear as `[redacted-N]`, ≤ 1024 characters, no control characters or backslashes); `path_redacted`; `start_line`, `end_line` (1-based), `start_column`, `end_column`. All four are `null` for `FILE_PATH`, which the schema enforces | ✓ |
+| `location` | `target` (`FILE_CONTENT`, `FILE_PATH` or `DEPENDENCY_MANIFEST`); `path`, the **safe** relative POSIX path of a snapshot file (redacted components appear as `[redacted-N]`, ≤ 1024 characters, no control characters or backslashes); `path_redacted`; `start_line`, `end_line` (1-based), `start_column`, `end_column`. All four are `null` for `FILE_PATH` and `DEPENDENCY_MANIFEST` (the manifest or lockfile declaring the dependency), which the schema enforces | ✓ |
 | `severity` | Normalized severity: `null` unless a scanner's scale maps without invention | `null` (not provided); Semgrep: `null` (its scale is not mapped) |
-| `scanner_severity` | Optional: the scanner's own label, verbatim; not a policy decision | absent; Semgrep: `ERROR`, `WARNING` or `INFO` |
+| `scanner_severity` | Optional: the scanner's own label, verbatim; not a policy decision | absent; Semgrep: `ERROR`, `WARNING` or `INFO`; Trivy (required): `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `UNKNOWN` |
+| `package` | Optional; required for `DEPENDENCY_VULNERABILITY`: `ecosystem` (`maven`, `npm`, `pypi`), `name`, `installed_version` (from the lockfile; validated, token-like runs replaced by `[redacted]`), `fixed_versions` (from the database; empty when no fix is known), `development` (`null` when the format does not record it), `redacted` | absent |
+| `advisory` | Optional; required for `DEPENDENCY_VULNERABILITY`: `aliases` (other ids of the advisory), `data_source` (for example `ghsa`), `status` (Trivy's fix status). No advisory prose or URLs | absent |
 | `classification` | Optional: `cwe` and `owasp` identifiers from the reviewed, bundled ruleset (never from scanner output) | absent; Semgrep: from the rule catalog |
 | `confidence` | `null` unless the scanner provides one | `null` (not provided) |
-| `evidence` | `redacted` and `excerpt`. **For `SECRET` and `CODE_PATTERN`, the schema requires `{redacted: true, excerpt: null}`**: no secret value and no source code is ever stored | Always redacted, no excerpt |
+| `evidence` | `redacted` and `excerpt`. **For `SECRET`, `CODE_PATTERN` and `DEPENDENCY_VULNERABILITY`, the schema requires `{redacted: true, excerpt: null}`**: no secret value, source code or lockfile content is ever stored | Always redacted, no excerpt |
 | `remediation` | `null`, or `summary` and `references` when a scanner or the knowledge base (M4) provides them | `null` |
 | `status` | `OPEN`: detected in this run, not triaged | `OPEN` |
 | `occurrences` | Identical fingerprints merged in this run | ≥ 1 |
@@ -102,6 +111,10 @@ persisted only in a safe form:
   tenant without review.
 - **Within one run,** findings with the same fingerprint are merged and counted in
   `occurrences`.
+- **Dependency findings** (Trivy) use `["sentinelpipe.finding.v1", scanner, rule_id,
+  "DEPENDENCY_MANIFEST", safe manifest path, ecosystem, package name, installed version]`:
+  no line numbers, which change whenever a lockfile is regenerated. This defines the
+  fingerprint of the new category; existing categories are unchanged.
 - **Across runs,** fingerprints are location-based: a finding that moves gets a new
   fingerprint. Correlating findings across commits, and the `NEW` / `EXISTING` /
   `RESOLVED` states, require valid, comparable coverage and belong to M4.
@@ -119,6 +132,17 @@ persisted only in a safe form:
 Slice 2 (Semgrep) extended v1 compatibly. It added scanner `semgrep`, category
 `CODE_PATTERN`, optional `scanner_severity`, `classification` and coverage counts, and
 new limitation codes. Gitleaks documents are unchanged and still valid.
+
+Slice 3 (Trivy) extended v1 compatibly in the same way:
+- scanner `trivy`;
+- category `DEPENDENCY_VULNERABILITY` and location target `DEPENDENCY_MANIFEST`;
+- Trivy's severity labels;
+- optional `package`, `advisory`, `coverage.dependencies` and `vulnerability_database`
+  blocks (the first two required for, and only allowed on, dependency findings);
+- twelve limitation codes (the last two added by the final audit), with `maxItems` for
+  limitations raised to 24.
+
+Gitleaks and Semgrep documents are unchanged and still valid.
 
 - The version lives in the file name, the `$id` and `schema_version`. Consumers must
   reject unknown versions.

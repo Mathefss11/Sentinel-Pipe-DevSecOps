@@ -43,10 +43,13 @@ import tools.jackson.databind.JsonNode;
  * REST request, lease claim, heartbeats, report, supervisor evaluation, REST read; REST
  * cancellation of a running job; recovery after the worker process is killed; and the
  * GITLEAKS scanner on synthetic repositories (real Gitleaks container, ADR-0010), whose
- * redacted findings are stored as verified evidence without ever producing PASS.
+ * redacted findings are stored as verified evidence without ever producing PASS; Semgrep
+ * (ADR-0011); and Trivy (ADR-0012) with a verified image built from the synthetic
+ * vulnerability database, including a worker that refuses a forged image lock.
  *
  * <p>
- * Requires {@code -Pe2e -Dsentinel.e2e.python=<python with sentinel-worker installed>}.
+ * Requires {@code -Pe2e -Dsentinel.e2e.python=<python with sentinel-worker installed>} and
+ * {@code -Dsentinel.e2e.trivy-lock=<lock of the synthetic Trivy image>}.
  */
 class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 
@@ -516,6 +519,150 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 		assertThat(document.at("/coverage/complete").asBoolean()).isTrue();
 		assertThat(sandboxes(jobId)).isEmpty();
 		assertCompletedButNeverPass(scanId);
+	}
+
+	// --- Trivy (ADR-0012) ---------------------------------------------------------------
+
+	/**
+	 * The lock of a verified Trivy image built from the SYNTHETIC vulnerability database
+	 * (scripts/trivy/build-fixture-db.sh, then {@code sentinel-worker trivy-image build}).
+	 */
+	private static Path trivyLock() {
+		String lock = System.getProperty("sentinel.e2e.trivy-lock", "");
+		if (lock.isBlank() || lock.contains("${") || !Files.isRegularFile(Path.of(lock))) {
+			throw new IllegalStateException("Run with -Pe2e -Dsentinel.e2e.trivy-lock=<lock of the synthetic"
+					+ " Trivy image> (scripts/trivy/build-fixture-db.sh, sentinel-worker trivy-image build)");
+		}
+		return Path.of(lock).toAbsolutePath();
+	}
+
+	private Map<String, String> trivyWorker(Path lock) {
+		Map<String, String> env = new HashMap<>();
+		env.put("SENTINEL_WORKER_FIXTURE_ENABLED", "false");
+		env.put("SENTINEL_WORKER_TRIVY_ENABLED", "true");
+		env.put("SENTINEL_WORKER_TRIVY_IMAGE_LOCK", lock.toString());
+		env.put("SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR", this.fixtures.toAbsolutePath().toString());
+		return env;
+	}
+
+	/** package-lock.json v3 with one vulnerable runtime dependency (synthetic advisory). */
+	private static String npmLock(String version) {
+		return """
+				{"name": "app", "version": "1.0.0", "lockfileVersion": 3, "requires": true, "packages": {
+				  "": {"name": "app", "version": "1.0.0", "dependencies": {"sentinelpipe-fixture-vulnerable": "%s"}},
+				  "node_modules/sentinelpipe-fixture-vulnerable": {"version": "%s"}}}
+				""".formatted(version, version);
+	}
+
+	private static final String VULNERABLE_POM = """
+			<project><modelVersion>4.0.0</modelVersion><groupId>dev.sentinelpipe.example</groupId>
+			<artifactId>app</artifactId><version>1.0.0</version><dependencies><dependency>
+			<groupId>dev.sentinelpipe.fixture</groupId><artifactId>vulnerable-parser</artifactId>
+			<version>1.4.0</version></dependency></dependencies></project>
+			""";
+
+	private UUID jobOf(UUID scanId) {
+		return this.jdbcTemplate.queryForObject("SELECT id FROM scan_jobs WHERE scan_id = ?", UUID.class, scanId);
+	}
+
+	private UUID organizationOf(UUID scanId) {
+		return this.jdbcTemplate.queryForObject(
+				"SELECT p.organization_id FROM scans s JOIN projects p ON p.id = s.project_id WHERE s.id = ?",
+				UUID.class, scanId);
+	}
+
+	@Test
+	void trivyFindsVulnerableDependenciesWithVerifiedProvenanceAndKeepsTenantsApart() throws Exception {
+		Path lock = trivyLock();
+		String suffix = UUID.randomUUID().toString().substring(0, 8);
+		UUID vulnerable = fixtureScan("sca-" + suffix,
+				Map.of("web/package-lock.json", npmLock("2.0.0"), "web/package.json", "{}", "svc/pom.xml",
+						VULNERABLE_POM,
+						// Repository-controlled Trivy configuration must not hide findings.
+						".trivyignore", "CVE-2099-0001\nGHSA-2f2f-3g3g-4h4h\n", "trivy.yaml", "severity: [LOW]\n"),
+				ScannerType.TRIVY);
+		UUID clean = fixtureScan("sca-clean-" + suffix, Map.of("package-lock.json", npmLock("2.0.1")),
+				ScannerType.TRIVY);
+
+		String output = finish(startWorker(0, trivyWorker(lock), "--idle-timeout", "3"));
+
+		assertThat(output).contains("scanner.completed");
+		UUID vulnerableJob = jobOf(vulnerable);
+		UUID cleanJob = jobOf(clean);
+		JsonNode document = findings(vulnerableJob);
+		assertThat(document.at("/scanner/name").asString()).isEqualTo("trivy");
+		assertThat(document.at("/scanner/version").asString()).isEqualTo("0.75.0");
+		assertThat(document.at("/context/organization_id").asString())
+			.isEqualTo(organizationOf(vulnerable).toString());
+		assertThat(document.at("/context/scan_id").asString()).isEqualTo(vulnerable.toString());
+		assertThat(document.at("/vulnerability_database/source/kind").asString()).isEqualTo("SYNTHETIC_FIXTURE");
+		assertThat(document.at("/vulnerability_database/freshness").asString()).isEqualTo("FRESH");
+		assertThat(document.at("/vulnerability_database/schema_version").asInt()).isEqualTo(2);
+		List<String> limitations = new java.util.ArrayList<>();
+		document.at("/coverage/limitations").forEach((value) -> limitations.add(value.asString()));
+		assertThat(limitations).contains("SYNTHETIC_VULNERABILITY_DATABASE", "ADVISORY_DATA_POINT_IN_TIME",
+				"REACHABILITY_NOT_ANALYZED", "PARTIAL_DEPENDENCY_RESOLUTION");
+		assertThat(document.at("/coverage/complete").asBoolean()).isFalse();
+		List<String> located = new java.util.ArrayList<>();
+		for (JsonNode finding : document.get("findings")) {
+			located.add(finding.at("/location/path").asString() + ":" + finding.get("rule_id").asString() + ":"
+					+ finding.at("/package/ecosystem").asString());
+			assertThat(finding.get("category").asString()).isEqualTo("DEPENDENCY_VULNERABILITY");
+			assertThat(finding.at("/location/target").asString()).isEqualTo("DEPENDENCY_MANIFEST");
+			assertThat(finding.at("/evidence/excerpt").isNull()).isTrue();
+			assertThat(finding.get("severity").isNull()).as("not mapped onto a normalized scale").isTrue();
+		}
+		assertThat(located).containsExactlyInAnyOrder("web/package-lock.json:CVE-2099-0001:npm",
+				"svc/pom.xml:GHSA-2f2f-3g3g-4h4h:maven");
+		// Advisory prose of the synthetic database is never stored anywhere.
+		assertThat(this.jdbcTemplate.queryForObject(
+				"SELECT (SELECT count(*) FROM evidence.objects WHERE position(? IN content) > 0)"
+						+ " + (SELECT count(*) FROM lifecycle.job_reports WHERE position(? IN result::text) > 0)",
+				Integer.class, "SYNTHETIC SentinelPipe".getBytes(StandardCharsets.UTF_8), "SYNTHETIC SentinelPipe"))
+			.isZero();
+
+		JsonNode cleanDocument = findings(cleanJob);
+		assertThat(cleanDocument.get("finding_count").asInt()).isZero();
+		assertThat(cleanDocument.at("/context/organization_id").asString())
+			.isEqualTo(organizationOf(clean).toString())
+			.isNotEqualTo(organizationOf(vulnerable).toString());
+		// Evidence is stored per tenant: the clean tenant's objects never hold the other's.
+		assertThat(this.jdbcTemplate.queryForObject(
+				"SELECT count(*) FROM evidence.objects WHERE organization_id = ? AND position(? IN content) > 0",
+				Integer.class, organizationOf(clean), "CVE-2099-0001".getBytes(StandardCharsets.UTF_8)))
+			.isZero();
+
+		assertThat(sandboxes(vulnerableJob)).isEmpty();
+		assertThat(sandboxes(cleanJob)).isEmpty();
+		// Findings are version matches, not a decision: INCOMPLETE until M4, never PASS.
+		assertCompletedButNeverPass(vulnerable);
+		// The supervisor run above evaluated the clean scan too: completed, still INCOMPLETE.
+		JsonNode cleanScan = scan(clean);
+		assertThat(cleanScan.get("executionStatus").asString()).isEqualTo("COMPLETED");
+		assertThat(cleanScan.get("securityDecision").asString()).isEqualTo("INCOMPLETE");
+		assertThat(cleanScan.get("decisionReason").asString()).isEqualTo("POLICY_EVALUATION_UNAVAILABLE");
+	}
+
+	@Test
+	void aWorkerWithAForgedTrivyLockRefusesToStartAndRunsNoJob() throws Exception {
+		JsonNode genuine = this.jsonMapper.readTree(Files.readString(trivyLock()));
+		// Everything genuine except the database date (security review S3-2).
+		((tools.jackson.databind.node.ObjectNode) genuine.at("/database/metadata"))
+			.put("updated_at", "2099-01-01T00:00:00.000000Z")
+			.put("next_update", "2099-01-02T00:00:00.000000Z");
+		Path forged = Files.createTempFile(this.fixtures, "forged-", ".lock");
+		Files.writeString(forged, genuine.toString());
+		UUID scanId = fixtureScan("sca-forged-" + UUID.randomUUID().toString().substring(0, 8),
+				Map.of("package-lock.json", npmLock("2.0.0")), ScannerType.TRIVY);
+
+		Process worker = startWorker(0, trivyWorker(forged), "--idle-timeout", "3");
+		assertThat(worker.waitFor(120, TimeUnit.SECONDS)).isTrue();
+		String output = new String(worker.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
+		assertThat(worker.exitValue()).as(output).isEqualTo(2);
+		assertThat(output).contains("trivy image rejected (METADATA_MISMATCH)");
+		assertThat(jobStatus(scanId)).isEqualTo("QUEUED");
+		assertThat(this.evidenceStore.list(jobOf(scanId))).isEmpty();
 	}
 
 }

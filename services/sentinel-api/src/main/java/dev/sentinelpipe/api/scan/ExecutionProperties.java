@@ -26,16 +26,17 @@ public class ExecutionProperties {
 
 	/**
 	 * Scanners that can be executed by this version: the harmless fixture, Gitleaks
-	 * (ADR-0010) and Semgrep (ADR-0011).
+	 * (ADR-0010), Semgrep (ADR-0011) and Trivy (ADR-0012).
 	 */
 	static final Set<ScannerType> EXECUTABLE_SCANNERS = EnumSet.of(ScannerType.FIXTURE, ScannerType.GITLEAKS,
-			ScannerType.SEMGREP);
+			ScannerType.SEMGREP, ScannerType.TRIVY);
 
 	/**
 	 * Real scanners whose workers read only local synthetic repositories so far: never
 	 * planned automatically under a production profile (workers refuse them there too).
 	 */
-	static final Set<ScannerType> LOCAL_FIXTURE_SCANNERS = EnumSet.of(ScannerType.GITLEAKS, ScannerType.SEMGREP);
+	static final Set<ScannerType> LOCAL_FIXTURE_SCANNERS = EnumSet.of(ScannerType.GITLEAKS, ScannerType.SEMGREP,
+			ScannerType.TRIVY);
 
 	/**
 	 * Allows the harmless FIXTURE scanner type to be planned. For development, CI and
@@ -187,7 +188,7 @@ public class ExecutionProperties {
 		for (ScannerType scanner : this.plannedScanners) {
 			if (!EXECUTABLE_SCANNERS.contains(scanner)) {
 				throw new IllegalStateException("sentinel.execution.planned-scanners: " + scanner
-						+ " is not executable by this version (only FIXTURE, GITLEAKS and SEMGREP are)");
+						+ " is not executable by this version (only FIXTURE, GITLEAKS, SEMGREP and TRIVY are)");
 			}
 			if (!isPlannable(scanner)) {
 				throw new IllegalStateException(

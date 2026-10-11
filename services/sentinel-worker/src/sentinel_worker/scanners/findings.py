@@ -9,7 +9,9 @@ serializes them with :func:`build_document`:
   scanner, rule_id, target, safe path, start_line, end_line, start_column, end_column]``.
   It is deterministic for identical input and contains no secret value and no raw path.
   It is location-based, so it changes when the finding moves; cross-commit correlation
-  is M4 work.
+  is M4 work. Dependency findings (Trivy) use ``["sentinelpipe.finding.v1", scanner,
+  rule_id, target, safe manifest path, ecosystem, package name, installed version]``
+  instead: no line numbers, which change whenever a lockfile is regenerated.
 * **Deduplication:** findings with the same fingerprint in one run are merged into one,
   with ``occurrences`` counting them.
 * **Identity:** ``id`` is a UUIDv5 of the job id and the fingerprint, so rebuilding the same
@@ -69,6 +71,11 @@ CATEGORY_SECRET = "SECRET"  # noqa: S105 - a category name, not a secret
 #: A code pattern associated with a vulnerability class (Semgrep). Not proof that the
 #: code is exploitable.
 CATEGORY_CODE_PATTERN = "CODE_PATTERN"
+#: A dependency version affected by a published advisory (Trivy). Not proof that the
+#: vulnerable code is reachable or exploitable.
+CATEGORY_DEPENDENCY_VULNERABILITY = "DEPENDENCY_VULNERABILITY"
+#: The finding concerns a dependency declared in this manifest or lockfile (no lines).
+DEPENDENCY_MANIFEST = "DEPENDENCY_MANIFEST"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +84,28 @@ class Classification:
 
     cwe: tuple[str, ...] = ()
     owasp: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PackageRef:
+    """The affected dependency (Trivy). Values are validated and token-like runs
+    redacted (``redacted``); they come from repository lockfiles."""
+
+    ecosystem: str
+    name: str
+    installed_version: str
+    fixed_versions: tuple[str, ...] = ()
+    development: bool | None = None
+    redacted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AdvisoryRef:
+    """The advisory a dependency finding refers to, from the verified database."""
+
+    aliases: tuple[str, ...] = ()
+    data_source: str | None = None
+    status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,8 +142,22 @@ class Finding:
     """The scanner's own severity label (for Semgrep: ERROR, WARNING, INFO), verbatim.
     It is not a policy decision and is not mapped onto ``severity``."""
     classification: Classification | None = None
+    package: PackageRef | None = None
+    advisory: AdvisoryRef | None = None
 
     def fingerprint(self, scanner: Scanner) -> str:
+        if self.package is not None:
+            dependency = [
+                FINGERPRINT_DOMAIN,
+                scanner.name,
+                self.rule_id,
+                self.target,
+                self.path,
+                self.package.ecosystem,
+                self.package.name,
+                self.package.installed_version,
+            ]
+            return hashlib.sha256(canonical_json_value(dependency)).hexdigest()
         identity = [
             FINGERPRINT_DOMAIN,
             scanner.name,
@@ -153,9 +196,17 @@ def build_document(
     limitations: Iterable[str],
     paths_redacted: int = 0,
     coverage: Coverage | None = None,
+    incomplete: bool = False,
+    dependencies: Mapping[str, int] | None = None,
+    vulnerability_database: Mapping[str, Any] | None = None,
 ) -> bytes:
     """Canonical findings.v1 bytes. Raises :class:`FindingsLimitError` when the findings
-    exceed the bounds, :class:`ValueError` if the document would violate the schema."""
+    exceed the bounds, :class:`ValueError` if the document would violate the schema.
+
+    ``incomplete`` forces ``coverage.complete = false`` for limitations the file counts do
+    not express (Trivy: partial dependency resolution, stale advisory data).
+    ``dependencies`` (coverage counts) and ``vulnerability_database`` are optional blocks
+    emitted only when given, so other scanners' documents are unchanged."""
     merged: dict[str, tuple[Finding, int]] = {}
     for finding in findings:
         key = finding.fingerprint(scanner)
@@ -181,7 +232,7 @@ def build_document(
     if not snapshot.files:
         # Nothing was scanned: never to be read as a clean repository.
         all_limitations.add("EMPTY_INPUT")
-    complete = not any(skipped[reason.value] for reason in INCOMPLETE_COVERAGE)
+    complete = not incomplete and not any(skipped[reason.value] for reason in INCOMPLETE_COVERAGE)
     coverage_document: dict[str, Any] = {}
     if coverage is not None:
         complete = complete and coverage.files_not_analyzed == 0
@@ -193,6 +244,8 @@ def build_document(
         }
         if coverage.not_analyzed_reasons is not None:
             coverage_document["not_analyzed_reasons"] = dict(coverage.not_analyzed_reasons)
+    if dependencies is not None:
+        coverage_document["dependencies"] = dict(dependencies)
     document: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "scanner": {"name": scanner.name, "version": scanner.version, "image": scanner.image},
@@ -222,6 +275,11 @@ def build_document(
             "exit_code": exit_code,
             "raw_report_sha256": raw_report_sha256,
         },
+        **(
+            {"vulnerability_database": dict(vulnerability_database)}
+            if vulnerability_database is not None
+            else {}
+        ),
         "finding_count": len(merged),
         "findings": [
             _finding_document(scanner, lease, fingerprint, finding, count)
@@ -272,5 +330,20 @@ def _finding_document(
         document["classification"] = {
             "cwe": list(finding.classification.cwe),
             "owasp": list(finding.classification.owasp),
+        }
+    if finding.package is not None:
+        document["package"] = {
+            "ecosystem": finding.package.ecosystem,
+            "name": finding.package.name,
+            "installed_version": finding.package.installed_version,
+            "fixed_versions": list(finding.package.fixed_versions),
+            "development": finding.package.development,
+            "redacted": finding.package.redacted,
+        }
+    if finding.advisory is not None:
+        document["advisory"] = {
+            "aliases": list(finding.advisory.aliases),
+            "data_source": finding.advisory.data_source,
+            "status": finding.advisory.status,
         }
     return document

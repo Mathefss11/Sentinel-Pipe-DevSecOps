@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.4.0",
+  "id": "GHSA-8q8q-9r9r-2v2v",
+  "modified": "2026-01-15T00:00:00Z",
+  "published": "2026-01-15T00:00:00Z",
+  "aliases": [],
+  "summary": "SYNTHETIC SentinelPipe test advisory (not a real vulnerability)",
+  "details": "Synthetic advisory for SentinelPipe tests. It describes no real software.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "npm",
+        "name": "sentinelpipe-fixture-devtool"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "1.0.5"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "references": [],
+  "database_specific": {
+    "cwe_ids": [],
+    "severity": "MODERATE",
+    "github_reviewed": true,
+    "github_reviewed_at": "2026-01-15T00:00:00Z",
+    "nvd_published_at": null
+  }
+}

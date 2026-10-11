@@ -50,7 +50,7 @@ class ScannerExecutor:
         source: RepositorySource,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        if sandbox.policy.image != adapter.identity.image:
+        if sandbox.policy.image != adapter.sandbox_image:
             raise ValueError("the sandbox policy does not use the adapter's image")
         self._sandbox = sandbox
         self._adapter = adapter

@@ -234,6 +234,10 @@ class GitleaksAdapter:
     def identity(self) -> Scanner:
         return IDENTITY
 
+    @property
+    def sandbox_image(self) -> str:
+        return IDENTITY.image
+
     def policy(
         self, timeout_seconds: float = 300.0, cpus: float = 1.0, runtime: str | None = None
     ) -> SandboxPolicy:

@@ -169,7 +169,9 @@
 		<!--
 			End-to-end tests across the Java control plane and the Python worker:
 			./mvnw verify -Pe2e -Dsentinel.e2e.python=<python with sentinel-worker installed>
-			The tests fail (never skip) when the interpreter is not configured.
+			  -Dsentinel.e2e.trivy-lock=<lock of a verified Trivy image built from the synthetic
+			  database: scripts/trivy/build-fixture-db.sh, then sentinel-worker trivy-image build>
+			The tests fail (never skip) when either is not configured.
 		-->
 		<profile>
 			<id>e2e</id>
@@ -186,6 +188,7 @@
 							<failIfNoTests>true</failIfNoTests>
 							<systemPropertyVariables>
 								<sentinel.e2e.python>${sentinel.e2e.python}</sentinel.e2e.python>
+								<sentinel.e2e.trivy-lock>${sentinel.e2e.trivy-lock}</sentinel.e2e.trivy-lock>
 							</systemPropertyVariables>
 						</configuration>
 					</plugin>

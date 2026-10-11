@@ -78,10 +78,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sandbox_check.add_argument(
         "--profile",
-        choices=("fixture", "gitleaks", "semgrep"),
+        choices=("fixture", "gitleaks", "semgrep", "trivy"),
         default="fixture",
-        help="Sandbox image and limits to verify (default: fixture).",
+        help=(
+            "Sandbox image and limits to verify (default: fixture). trivy verifies the image "
+            "named by SENTINEL_WORKER_TRIVY_IMAGE_LOCK first."
+        ),
     )
+    trivy_image = commands.add_parser(
+        "trivy-image",
+        help="Build or verify the Trivy image with an embedded vulnerability database (ADR-0012).",
+    )
+    trivy_commands = trivy_image.add_subparsers(dest="trivy_command", required=True)
+    trivy_build = trivy_commands.add_parser(
+        "build",
+        help=(
+            "Build and load the image from a prepared database directory (trivy.db, "
+            "metadata.json, provenance.json) and write its lock. Needs the pinned base image."
+        ),
+    )
+    trivy_build.add_argument("--db-dir", required=True, help="Prepared database directory.")
+    trivy_build.add_argument("--lock-out", required=True, help="Where to write the lock file.")
+    trivy_verify = trivy_commands.add_parser(
+        "verify", help="Verify the image a lock names, by content; prints a JSON report."
+    )
+    trivy_verify.add_argument("--lock", required=True, help="The lock file.")
     commands.add_parser("dlq-depth", help="[operator] Ready messages in the dead-letter queue.")
     replay = commands.add_parser(
         "dlq-replay",
@@ -166,6 +187,7 @@ def _execute(args: argparse.Namespace) -> int:
     from sentinel_worker.metrics import ExecutionMetrics, MetricsSettings, serve
     from sentinel_worker.repository.snapshot import LocalFixtureRepositorySource
     from sentinel_worker.sandbox.docker import DockerCli, DockerSandbox, SandboxError
+    from sentinel_worker.scanners.adapter import ScannerError
     from sentinel_worker.scanners.executor import DispatchingExecutor, ScannerExecutor
 
     try:
@@ -218,6 +240,46 @@ def _execute(args: argparse.Namespace) -> int:
                     LocalFixtureRepositorySource(settings.repository_fixtures_dir),
                 )
             )
+        if settings.trivy_enabled:
+            # Imported only when enabled: other workers never touch the Trivy image or its
+            # database (ADR-0012).
+            from sentinel_worker.scanners.trivy import TrivyAdapter
+            from sentinel_worker.scanners.trivy_image import ImageError, load_and_verify
+
+            if (
+                settings.docker_cli is None
+                or settings.trivy_image_lock is None
+                or settings.repository_fixtures_dir is None
+            ):  # pragma: no cover - guaranteed by settings
+                raise AssertionError("trivy settings missing")
+            docker = DockerCli(settings.docker_cli)
+            try:
+                image = load_and_verify(docker, settings.trivy_image_lock)
+            except ImageError as exc:
+                print(f"configuration error: trivy image rejected ({exc.code})", file=sys.stderr)
+                return EXIT_CONFIGURATION
+            trivy = TrivyAdapter(image)
+            # A database that is already too old (or from the future) refuses to start.
+            trivy.database_state()
+            trivy_sandbox = DockerSandbox(
+                docker,
+                trivy.policy(
+                    settings.sandbox_timeout_seconds, settings.sandbox_cpus,
+                    settings.sandbox_runtime,
+                ),
+            )  # fmt: skip
+            trivy_sandbox.check()
+            trivy_sandbox.reap_expired()
+            executors.append(
+                ScannerExecutor(
+                    trivy_sandbox,
+                    trivy,
+                    LocalFixtureRepositorySource(settings.repository_fixtures_dir),
+                )
+            )
+    except ScannerError as exc:
+        print(f"configuration error: trivy database unusable ({exc.code})", file=sys.stderr)
+        return EXIT_CONFIGURATION
     except SandboxError as exc:
         print(f"unavailable: {exc}", file=sys.stderr)
         return EXIT_UNAVAILABLE
@@ -280,12 +342,12 @@ def _sandbox_check(profile: str = "fixture") -> int:
         "gitleaks": lambda: GitleaksAdapter().policy(timeout_seconds=60),
         "semgrep": lambda: SemgrepAdapter().policy(timeout_seconds=60),
     }
-    policy = profiles[profile]()
     try:
+        policy = _trivy_policy() if profile == "trivy" else profiles[profile]()
         sandbox = DockerSandbox(DockerCli(_docker_cli(os.environ)), policy)
         sandbox.check()
         run = sandbox.run(probe_command(), threading.Event())
-    except (ConfigurationError, SandboxError) as exc:
+    except (ConfigurationError, SandboxError, ValueError) as exc:
         print(json.dumps({"healthy": False, "error": str(exc)}, indent=2))
         return EXIT_UNAVAILABLE
     report = (
@@ -382,6 +444,50 @@ def _operator(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _trivy_policy() -> Any:
+    """The Trivy sandbox policy, after verifying the image the configured lock names."""
+    from sentinel_worker.execution.settings import TRIVY_IMAGE_LOCK_VAR, _docker_cli
+    from sentinel_worker.sandbox.docker import DockerCli
+    from sentinel_worker.scanners.trivy import TrivyAdapter
+    from sentinel_worker.scanners.trivy_image import ImageError, load_and_verify
+
+    lock = os.environ.get(TRIVY_IMAGE_LOCK_VAR, "").strip()
+    if not lock:
+        raise ConfigurationError(f"{TRIVY_IMAGE_LOCK_VAR} is required for the trivy profile")
+    try:
+        image = load_and_verify(DockerCli(_docker_cli(os.environ)), lock)
+    except ImageError as exc:
+        raise ConfigurationError(f"trivy image rejected ({exc.code})") from None
+    return TrivyAdapter(image).policy(timeout_seconds=60)
+
+
+def _trivy_image(args: argparse.Namespace) -> int:
+    """``trivy-image build`` and ``trivy-image verify`` (operator and CI tooling)."""
+    from pathlib import Path
+
+    from sentinel_worker.execution.settings import _docker_cli
+    from sentinel_worker.sandbox.docker import DockerCli, SandboxError
+    from sentinel_worker.scanners.trivy_image import ImageError, build_image, load_and_verify
+
+    try:
+        docker = DockerCli(_docker_cli(os.environ))
+        if args.trivy_command == "build":
+            lock = build_image(docker, Path(args.db_dir))
+            Path(args.lock_out).write_bytes(lock.to_bytes())
+            report = {"built": True, "image_id": lock.image_id, "lock": args.lock_out}
+        else:
+            verified = load_and_verify(docker, args.lock)
+            report = {"verified": True, "image_id": verified.image_id}
+    except ImageError as exc:
+        print(json.dumps({"verified": False, "error": exc.code}, indent=2))
+        return EXIT_UNHEALTHY
+    except (ConfigurationError, SandboxError, OSError) as exc:
+        print(json.dumps({"verified": False, "error": type(exc).__name__}, indent=2))
+        return EXIT_UNAVAILABLE
+    print(json.dumps(report, indent=2))
+    return EXIT_OK
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -398,5 +504,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "sandbox-check":
         return _sandbox_check(args.profile)
+
+    if args.command == "trivy-image":
+        return _trivy_image(args)
 
     return _operator(args)

@@ -190,15 +190,19 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # The sandbox images must match FIXTURE_IMAGE, GITLEAKS_IMAGE and SEMGREP_IMAGE in
-      # sentinel_worker/sandbox/policy.py (Gitleaks from ghcr.io, Semgrep from Docker Hub; by
-      # digest). Workers never pull at execution time (--pull never).
+      # The sandbox images must match FIXTURE_IMAGE, GITLEAKS_IMAGE, SEMGREP_IMAGE and
+      # TRIVY_BASE_IMAGE in sentinel_worker/sandbox/policy.py (Gitleaks and Trivy from
+      # ghcr.io, Semgrep from Docker Hub; by digest). The Go image only builds the synthetic
+      # Trivy database (scripts/trivy/build-fixture-db.sh). Workers never pull at execution
+      # time (--pull never).
       - name: Pre-pull sandbox and Testcontainers images
         run: >-
           sh "$GITHUB_WORKSPACE/scripts/ci/pull-images.sh"
           alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
           ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
           semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b
+          ghcr.io/aquasecurity/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+          golang:1.26.9-alpine3.23@sha256:6750308561953d451210ed1a8086d36c8c8bdcbf672d38d9d0d424b8a7a0216c
           postgres@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
           rabbitmq@sha256:3ef7f7e89fed709a78f79b8b5f4e30e1312a1d4089da752e23595566d9d61a95
 
@@ -219,14 +223,33 @@ jobs:
       - name: Sandbox self-check (Semgrep profile)
         run: sentinel-worker sandbox-check --profile semgrep
 
+      # The SYNTHETIC Trivy database (fictitious packages) built with the pinned upstream
+      # trivy-db builder: modules come from the Go proxy, verified against the checksum
+      # database; no vulnerability database is downloaded (ADR-0012).
+      - name: Build the synthetic Trivy database
+        run: sh "$GITHUB_WORKSPACE/scripts/trivy/build-fixture-db.sh" "$RUNNER_TEMP/trivy-db"
+
+      # Builds the Trivy image with the database layer and verifies it by content.
+      - name: Build and verify the Trivy image
+        run: >-
+          sentinel-worker trivy-image build --db-dir "$RUNNER_TEMP/trivy-db"
+          --lock-out "$RUNNER_TEMP/trivy-image.lock"
+
+      # The same controls under the verified Trivy image and limits (ADR-0012).
+      - name: Sandbox self-check (Trivy profile)
+        env:
+          SENTINEL_WORKER_TRIVY_IMAGE_LOCK: ${{ runner.temp }}/trivy-image.lock
+        run: sentinel-worker sandbox-check --profile trivy
+
       # Isolation, limits, timeouts, cancellation, cleanup and crash recovery, plus the full
-      # protocol with PostgreSQL; real Gitleaks and Semgrep scans of synthetic repositories,
-      # including symlink escapes (POSIX only). A missing runtime or image fails instead of
-      # skipping.
+      # protocol with PostgreSQL; real Gitleaks, Semgrep and Trivy scans of synthetic
+      # repositories, including symlink escapes (POSIX only). A missing runtime, image or
+      # synthetic Trivy database fails instead of skipping.
       - name: Sandbox tests
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
           SENTINEL_REQUIRE_SANDBOX: "1"
+          SENTINEL_TEST_TRIVY_DB_DIR: ${{ runner.temp }}/trivy-db
         run: python -m pytest -m sandbox -v
 
       - name: No sandbox left behind
@@ -236,7 +259,7 @@ jobs:
   e2e:
     name: End-to-end (API → outbox → RabbitMQ → worker)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -290,22 +313,35 @@ jobs:
           alpine@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
           ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
           semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b
+          ghcr.io/aquasecurity/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+          golang:1.26.9-alpine3.23@sha256:6750308561953d451210ed1a8086d36c8c8bdcbf672d38d9d0d424b8a7a0216c
 
       - name: Log out of Docker Hub
         if: always()
         run: docker logout
 
+      # The synthetic Trivy database and its verified image for the Trivy E2E tests (no real
+      # vulnerability database is downloaded; see the sandbox job and ADR-0012).
+      - name: Build the synthetic Trivy database and image
+        run: |
+          sh scripts/trivy/build-fixture-db.sh "$RUNNER_TEMP/trivy-db"
+          sentinel-worker trivy-image build --db-dir "$RUNNER_TEMP/trivy-db" --lock-out "$RUNNER_TEMP/trivy-image.lock"
+
       # Java scan creation, outbox publication with confirms, RabbitMQ delivery, and the real
       # Python worker process recording its receipt in PostgreSQL, verified against the
       # outbox (ScanDeliveryE2ETests); forged messages and an audited operator DLQ replay;
-      # sandboxed execution, cancellation, crash recovery, and Gitleaks and Semgrep scans of
-      # synthetic repositories with redacted findings (ScanExecutionE2ETests).
+      # sandboxed execution, cancellation, crash recovery, and Gitleaks, Semgrep and Trivy scans
+      # of synthetic repositories with redacted findings, plus a worker refusing a forged Trivy
+      # image lock (ScanExecutionE2ETests).
       # The e2e profile sets failIfNoTests, so this step fails if no E2E test runs.
       - name: Run end-to-end tests
         working-directory: services/sentinel-api
         env:
           TESTCONTAINERS_RYUK_DISABLED: "true"
-        run: sh ./mvnw --batch-mode --no-transfer-progress verify -Pe2e "-Dsentinel.e2e.python=$(command -v python)"
+        run: >-
+          sh ./mvnw --batch-mode --no-transfer-progress verify -Pe2e
+          "-Dsentinel.e2e.python=$(command -v python)"
+          "-Dsentinel.e2e.trivy-lock=$RUNNER_TEMP/trivy-image.lock"
 
   infrastructure:
     name: Infrastructure configuration

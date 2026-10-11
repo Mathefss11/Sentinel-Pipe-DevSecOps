@@ -2,7 +2,8 @@
 
 An adapter describes one reviewed scanner and owns everything scanner-specific:
 
-* **identity**: name, version and the digest-pinned image (:class:`~.findings.Scanner`);
+* **identity**: name, version and the digest-pinned image (:class:`~.findings.Scanner`),
+  and the image the sandbox actually runs (:attr:`ScannerAdapter.sandbox_image`);
 * **sandbox policy**: the image plus resource limits (:meth:`ScannerAdapter.policy`);
 * **input**: which files it receives (:meth:`ScannerAdapter.prepare`) and how they are
   presented (:meth:`ScannerAdapter.stdin`);
@@ -43,6 +44,12 @@ class ScannerAdapter(Protocol):
 
     @property
     def identity(self) -> Scanner: ...  # pragma: no cover
+
+    @property
+    def sandbox_image(self) -> str:
+        """The image the sandbox runs: ``identity.image``, or for Trivy the verified local
+        image derived from it (ADR-0012)."""
+        ...  # pragma: no cover
 
     def policy(
         self, timeout_seconds: float, cpus: float, runtime: str | None

@@ -49,6 +49,35 @@ SEMGREP_IMAGE = (
     "semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b"
 )
 ALLOWED_IMAGES = frozenset({FIXTURE_IMAGE, GITLEAKS_IMAGE, SEMGREP_IMAGE})
+#: Trivy v0.75.0, official image (Alpine, BusyBox userland), pinned by its multi-platform
+#: index digest (ghcr.io; linux/amd64 is the verified platform). Reviewed for M3 Phase 2
+#: Slice 3 (ADR-0012, docs/runbooks/trivy.md). It is **not** run directly: scans run a
+#: local image derived from it with the vulnerability database as one read-only layer,
+#: accepted only after content verification (sentinel_worker/scanners/trivy_image.py).
+#: Must match .github/workflows/ci.yml.
+TRIVY_BASE_IMAGE = "ghcr.io/aquasecurity/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa"  # noqa: E501
+#: Local images (``sha256:<id>``) whose content this process has verified against a pinned
+#: base (today only Trivy with an embedded database, ADR-0012). Filled exclusively by
+#: :func:`register_verified_image`, which only the verifier calls after checking content;
+#: never from configuration.
+_VERIFIED_LOCAL_IMAGES: set[str] = set()
+_LOCAL_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
+
+
+def register_verified_image(image_id: str) -> None:
+    """Allows a content-verified local image (``sha256:<id>``) as a sandbox image for the
+    lifetime of this process. Call only after verification (ADR-0012)."""
+    if not _LOCAL_IMAGE_ID.match(image_id):
+        raise ValueError("a verified local image is referenced by its sha256 image id")
+    _VERIFIED_LOCAL_IMAGES.add(image_id)
+
+
+def is_allowed_image(image: str) -> bool:
+    """A digest-pinned, reviewed image, or a local image verified in this process."""
+    if image in ALLOWED_IMAGES:
+        return bool(_DIGEST_REF.match(image))
+    return image in _VERIFIED_LOCAL_IMAGES and bool(_LOCAL_IMAGE_ID.match(image))
+
 
 #: Environment variables an allowlisted image declares itself (``ENV`` in its config),
 #: besides ``PATH``. Docker passes them to every container of the image; they are not
@@ -123,8 +152,10 @@ class SandboxPolicy:
     workload: Workload = Workload.TRUSTED_TOOL
 
     def __post_init__(self) -> None:
-        if self.image not in ALLOWED_IMAGES or not _DIGEST_REF.match(self.image):
-            raise ValueError("sandbox image is not an allowlisted, digest-pinned image")
+        if not is_allowed_image(self.image):
+            raise ValueError(
+                "sandbox image is not an allowlisted, digest-pinned image or a verified local image"
+            )
         if not 16 * 1024 * 1024 <= self.memory_bytes <= 8 * 1024 * 1024 * 1024:
             raise ValueError("memory must be between 16 MiB and 8 GiB")
         if not 0.1 <= self.cpus <= 8:

@@ -59,3 +59,11 @@ def make_sandbox(docker_cli: DockerCli) -> Callable[..., DockerSandbox]:
         )
 
     return make
+
+
+@pytest.fixture(scope="session")
+def trivy_images(docker_cli: DockerCli, tmp_path_factory: pytest.TempPathFactory) -> Any:
+    """Verified Trivy images built from the synthetic database (see trivy_images.py)."""
+    from trivy_images import trivy_images as build
+
+    return build(docker_cli, tmp_path_factory.mktemp("trivy-db"))

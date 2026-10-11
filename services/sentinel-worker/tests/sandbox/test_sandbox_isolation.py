@@ -155,12 +155,50 @@ def test_resource_exhaustion_is_contained_by_the_limits(make_sandbox: MakeSandbo
     pids = sandbox.run(command(FixtureMode.PIDS, lease(), 0), threading.Event())
     memory = sandbox.run(command(FixtureMode.MEMORY, lease(), 0), threading.Event())
 
-    assert pids.status is SandboxStatus.PIDS_EXHAUSTED
+    # The PIDS_EXHAUSTED label comes from sampling `docker stats` about once a second. Under
+    # host load (observed on Docker Desktop: peak 31 of 32 when sampled) a slowed fork bomb
+    # can still be running at the timeout and is labelled TIMED_OUT. Either way it is killed
+    # and never a success; the kernel enforcement itself is verified deterministically by
+    # test_the_kernel_refuses_forks_beyond_the_pid_limit.
+    assert pids.status in {SandboxStatus.PIDS_EXHAUSTED, SandboxStatus.TIMED_OUT}
+    assert pids.removed
     assert pids.peak_pids is not None
     assert pids.peak_pids <= sandbox.policy.pids
     assert memory.status is SandboxStatus.OOM_KILLED
     if memory.peak_memory_bytes is not None:
         assert memory.peak_memory_bytes <= sandbox.policy.memory_bytes * 1.05
+
+
+def test_the_kernel_refuses_forks_beyond_the_pid_limit(make_sandbox: MakeSandbox) -> None:
+    # Deterministic check of the PID invariant (no sampling, no race with a timeout): try
+    # twice as many processes as allowed, then read the cgroup's own accounting. pids.events
+    # "max" counts forks the kernel refused because of the limit.
+    sandbox = make_sandbox(timeout_seconds=30)
+    limit = sandbox.policy.pids
+    # The attempts run in a child shell: BusyBox ash exits (status 2) when the kernel
+    # refuses a fork, which then frees one PID for the parent to read the counters with
+    # builtins only.
+    script = textwrap.dedent(
+        f"""
+        sh -c 'i=0; while [ $i -lt {2 * limit} ]; do sleep 600 & i=$((i + 1)); done' 2>/dev/null
+        child=$?
+        read current < /sys/fs/cgroup/pids.current
+        read max < /sys/fs/cgroup/pids.max
+        while read key value; do
+          [ "$key" = max ] && refused=$value
+        done < /sys/fs/cgroup/pids.events
+        echo "child=$child current=$current max=$max refused=$refused"
+        """
+    )
+
+    run = sandbox.run(["/bin/sh", "-c", script], threading.Event())
+
+    values = dict(line.split("=", 1) for line in run.stdout.decode().split() if "=" in line)
+    assert run.removed
+    assert values["child"] != "0"  # the attempts were stopped by the kernel, not completed
+    assert values["max"] == str(limit)
+    assert int(values["current"]) <= limit
+    assert int(values["refused"]) >= 1
 
 
 def test_the_worker_stays_responsive_while_a_sandbox_burns_cpu(make_sandbox: MakeSandbox) -> None:

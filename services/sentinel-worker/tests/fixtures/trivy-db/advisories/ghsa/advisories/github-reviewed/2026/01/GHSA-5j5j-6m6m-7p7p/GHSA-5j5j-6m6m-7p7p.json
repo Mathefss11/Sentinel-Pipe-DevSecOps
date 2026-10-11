@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.4.0",
+  "id": "GHSA-5j5j-6m6m-7p7p",
+  "modified": "2026-01-15T00:00:00Z",
+  "published": "2026-01-15T00:00:00Z",
+  "aliases": [
+    "CVE-2099-0001"
+  ],
+  "summary": "SYNTHETIC SentinelPipe test advisory (not a real vulnerability)",
+  "details": "Synthetic advisory for SentinelPipe tests. It describes no real software.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "npm",
+        "name": "sentinelpipe-fixture-vulnerable"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "2.0.1"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "references": [],
+  "database_specific": {
+    "cwe_ids": [
+      "CWE-1321"
+    ],
+    "severity": "HIGH",
+    "github_reviewed": true,
+    "github_reviewed_at": "2026-01-15T00:00:00Z",
+    "nvd_published_at": null
+  }
+}

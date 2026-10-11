@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.4.0",
+  "id": "GHSA-3w3w-4x4x-5c5c",
+  "modified": "2026-01-15T00:00:00Z",
+  "published": "2026-01-15T00:00:00Z",
+  "aliases": [],
+  "summary": "SYNTHETIC SentinelPipe test advisory (not a real vulnerability)",
+  "details": "Synthetic advisory for SentinelPipe tests. It describes no real software.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "PyPI",
+        "name": "sentinelpipe-fixture-vulnerable"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "3.1.0"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "references": [],
+  "database_specific": {
+    "cwe_ids": [
+      "CWE-89"
+    ],
+    "severity": "HIGH",
+    "github_reviewed": true,
+    "github_reviewed_at": "2026-01-15T00:00:00Z",
+    "nvd_published_at": null
+  }
+}

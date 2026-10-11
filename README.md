@@ -409,6 +409,7 @@ $env:SENTINEL_WORKER_FIXTURE_ENABLED = "true"
 | `SENTINEL_WORKER_FIXTURE_EXECUTOR`, `SENTINEL_WORKER_SANDBOX_*`, `SENTINEL_WORKER_DOCKER_CLI` | Sandbox (default) or inline execution, sandbox limits and runtime ([execution runbook](docs/runbooks/execution.md#5-sandboxes)) |
 | `SENTINEL_WORKER_GITLEAKS_ENABLED` / `SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR` | `execute`: run `GITLEAKS` jobs against synthetic repositories at `<dir>/<owner>/<name>` (refused in `production`; [runbook](docs/runbooks/gitleaks.md)) |
 | `SENTINEL_WORKER_SEMGREP_ENABLED` | `execute`: run `SEMGREP` jobs on the same fixtures (refused in `production`; [runbook](docs/runbooks/semgrep.md)) |
+| `SENTINEL_WORKER_TRIVY_ENABLED` / `SENTINEL_WORKER_TRIVY_IMAGE_LOCK` | `execute`: run `TRIVY` jobs on the same fixtures with the verified image named by the lock (refused in `production`; [runbook](docs/runbooks/trivy.md)) |
 | `SENTINEL_WORKER_EXECUTION_POLL_SECONDS` | `execute`: delay between claim attempts when idle (default 5) |
 
 Operator recovery commands (`outbox-summary`, `outbox-list-failed`,
@@ -468,7 +469,7 @@ Details: [ADR-0004](docs/adr/0004-transactional-outbox-and-at-least-once-messagi
 | Worker formatting | `.\.venv\Scripts\ruff.exe format --check .` | — |
 | Worker unit tests | `.\.venv\Scripts\python.exe -m pytest -m "not integration"` | — |
 | Worker tests incl. RabbitMQ and PostgreSQL integration | `.\.venv\Scripts\python.exe -m pytest` | Docker (Testcontainers); sandbox tests also need the pinned sandbox image (skipped otherwise) |
-| Sandbox isolation and real Gitleaks and Semgrep scans | `.\.venv\Scripts\python.exe -m pytest -m sandbox`, `sentinel-worker sandbox-check` and `sentinel-worker sandbox-check --profile gitleaks` / `--profile semgrep` | Docker, the pinned fixture, Gitleaks and Semgrep images ([Gitleaks](docs/runbooks/gitleaks.md#1-pinned-image), [Semgrep](docs/runbooks/semgrep.md#1-pinned-image-and-ruleset)) |
+| Sandbox isolation and real Gitleaks, Semgrep and Trivy scans | `.\.venv\Scripts\python.exe -m pytest -m sandbox`, `sentinel-worker sandbox-check` and `sentinel-worker sandbox-check --profile gitleaks` / `--profile semgrep` / `--profile trivy` | Docker, the pinned fixture, Gitleaks, Semgrep and Trivy images; for Trivy also the synthetic database in `SENTINEL_TEST_TRIVY_DB_DIR` ([Gitleaks](docs/runbooks/gitleaks.md#1-pinned-image), [Semgrep](docs/runbooks/semgrep.md#1-pinned-image-and-ruleset), [Trivy](docs/runbooks/trivy.md#2-preparing-a-database-and-its-image)) |
 | End to end: API → outbox → RabbitMQ → real worker | `.\mvnw.cmd verify -Pe2e "-Dsentinel.e2e.python=..\sentinel-worker\.venv\Scripts\python.exe"` (`services/sentinel-api`) | Docker, worker installed |
 | Compose configuration | `docker compose --env-file .env.example config --quiet` (repository root) | Docker |
 | OPA authorization policy | `docker run --rm -v "${PWD}\infrastructure\docker\opa:/policies:ro" openpolicyagent/opa:1.21.1 test /policies -v` | Docker |
@@ -534,11 +535,13 @@ five jobs (the worker job runs once per Python version):
   including RabbitMQ and PostgreSQL integration tests via Testcontainers (pinned images,
   pre-pulled; schema from the real Flyway migrations, identities from the real
   provisioning scripts).
-- **Sandbox isolation:** `sandbox-check` for the fixture, Gitleaks and Semgrep profiles, then every
+- **Sandbox isolation:** builds the synthetic Trivy database and its verified image, runs
+  `sandbox-check` for the fixture, Gitleaks, Semgrep and Trivy profiles, then every
   sandbox-marked test with real containers on Linux:
   - isolation, limits, cancellation and crash reaping;
-  - real Gitleaks and Semgrep scans of synthetic repositories, including symlink
-    escapes, hostile archives and suppression attempts.
+  - real Gitleaks, Semgrep and Trivy scans of synthetic repositories, including symlink
+    escapes, hostile archives and suppression attempts;
+  - Trivy image verification and database states (stale, expired, corrupted, truncated).
 
   It fails, rather than skips, when the runtime or a pinned image is missing, and checks
   that no sandbox is left behind.
@@ -681,7 +684,21 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   - real-container, integration and end-to-end tests.
 
   Scans local synthetic repositories only.
-- [ ] Trivy adapter; verified commit snapshots (remote repositories)
+- [x] Slice 3: Trivy SCA (ADR-0012):
+  - pinned Trivy 0.75.0; dependency vulnerabilities only (Maven, npm, PyPI lockfiles
+    and manifests);
+  - the vulnerability database as one deterministic, read-only image layer, verified by
+    content against the pinned base before use (no network, no mounts in the sandbox);
+  - digest-pinned upstream fetch; freshness policy (stale after 48 h, refused after
+    7 days); bbolt structure check against truncated databases;
+  - per-manifest coverage check and dependency counts (partial formats, unresolved
+    versions, missing lockfiles, unsupported formats);
+  - identifiers-only report; synthetic database fixtures built with the pinned upstream
+    builder;
+  - real-container and integration tests.
+
+  Scans local synthetic repositories only. No automatic database updater.
+- [ ] Verified commit snapshots (remote repositories)
 
 ## Architecture decisions
 
@@ -699,6 +716,8 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   ([threat model](docs/threat-model/gitleaks-scanner.md), [findings contract](docs/api/findings-contract-v1.md))
 - [ADR-0011: Semgrep SAST with a bundled, reviewed ruleset](docs/adr/0011-semgrep-sast-with-a-bundled-ruleset.md)
   ([threat model](docs/threat-model/semgrep-scanner.md), [runbook](docs/runbooks/semgrep.md))
+- [ADR-0012: Trivy dependency scanning with an embedded, verified vulnerability database](docs/adr/0012-trivy-sca-with-an-embedded-verified-database.md)
+  ([threat model](docs/threat-model/trivy-scanner.md), [runbook](docs/runbooks/trivy.md))
 
 ## Current security limitations
 
@@ -724,7 +743,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   should migrate in a separate step.
 - `triggerType` and `branch` are supplied by the caller and not yet verified against
   GitHub events or Actions OIDC claims. There is no rate limiting.
-- Gitleaks and Semgrep are the only real scanners. They scan **local synthetic
+- Gitleaks, Semgrep and Trivy are the only real scanners. They scan **local synthetic
   repositories** only: no
   repository is fetched, and the scanned content is not verified to be the commit
   (`commit_verified: false`). There is no policy engine, so no scan can reach `PASS` or
@@ -740,6 +759,14 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
   suspicious pattern, not proof of exploitability, and a clean result is not a pass.
   Files in other languages, and files Semgrep could not fully parse, are reported as not
   analyzed.
+- Trivy reports dependency versions that fall in published advisories' affected ranges,
+  not reachable or exploitable code. Its advisory data is a snapshot up to 7 days old,
+  refreshed manually through an audited procedure (no automatic updater). `pom.xml` and
+  `requirements.txt` resolve only partly offline; Java archives and other ecosystems are
+  not analyzed; Trivy's PyPI name matching and `Pipfile.lock` development dependencies
+  are disclosed as unverified coverage. The worker
+  verifies the image and database by content, but cannot verify offline that a database
+  is the genuine upstream one (ADR-0012, residual risk R2).
 
   Every findings document records these limitations. Secrets in file names are detected
   and redacted on a best-effort basis
@@ -765,7 +792,7 @@ username as the repository variable `DOCKERHUB_USERNAME` and the token as the re
 |---|---|
 | M1 — Foundation | Complete |
 | **M2 — Domain & Contracts** | Phases 1, 2A, 2B and 2C complete (see checklists) |
-| **M3 — Scanners** | Phase 1 complete (privilege separation, leases, result integrity, sandbox); Phase 2 in progress: Gitleaks and Semgrep done, Trivy next |
+| **M3 — Scanners** | Phase 1 complete (privilege separation, leases, result integrity, sandbox); Phase 2 in progress: Gitleaks, Semgrep and Trivy done |
 | M4 — Security Gate & Remediation | OPA policies, coverage, exceptions, decisions, remediation reports |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |
 | M6 — Advanced Security | Checkov, Syft/SBOM, ZAP, attestation, isolated staging |

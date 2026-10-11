@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.4.0",
+  "id": "GHSA-2f2f-3g3g-4h4h",
+  "modified": "2026-01-15T00:00:00Z",
+  "published": "2026-01-15T00:00:00Z",
+  "aliases": [],
+  "summary": "SYNTHETIC SentinelPipe test advisory (not a real vulnerability)",
+  "details": "Synthetic advisory for SentinelPipe tests. It describes no real software.",
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "Maven",
+        "name": "dev.sentinelpipe.fixture:vulnerable-parser"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "1.4.2"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "references": [],
+  "database_specific": {
+    "cwe_ids": [
+      "CWE-502"
+    ],
+    "severity": "CRITICAL",
+    "github_reviewed": true,
+    "github_reviewed_at": "2026-01-15T00:00:00Z",
+    "nvd_published_at": null
+  }
+}

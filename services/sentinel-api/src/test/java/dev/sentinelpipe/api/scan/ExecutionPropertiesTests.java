@@ -44,7 +44,7 @@ class ExecutionPropertiesTests {
 	void onlyExecutableScannersCanBePlannedAutomatically() {
 		ExecutionProperties properties = new ExecutionProperties();
 		properties.setFixtureEnabled(true);
-		properties.setPlannedScanners(List.of(ScannerType.TRIVY));
+		properties.setPlannedScanners(List.of(ScannerType.CHECKOV));
 
 		assertThatThrownBy(() -> properties.validate(NO_PROFILES)).hasMessageContaining("not executable");
 
@@ -83,6 +83,27 @@ class ExecutionPropertiesTests {
 		assertThatThrownBy(() -> properties.validate(new String[] { profile }))
 			.isInstanceOf(IllegalStateException.class)
 			.hasMessageContaining("GITLEAKS is not permitted with a production profile");
+	}
+
+	@Test
+	void trivyCanBePlannedAutomaticallyOutsideProduction() {
+		ExecutionProperties properties = new ExecutionProperties();
+		properties.setPlannedScanners(List.of(ScannerType.GITLEAKS, ScannerType.SEMGREP, ScannerType.TRIVY));
+
+		assertThatCode(() -> properties.validate(new String[] { "local" })).doesNotThrowAnyException();
+		assertThat(properties.isPlannable(ScannerType.TRIVY)).isTrue();
+	}
+
+	@ParameterizedTest
+	@ValueSource(strings = { "prod", "production", "PROD" })
+	void trivyIsNotPlannedAutomaticallyUnderProductionProfiles(String profile) {
+		// Workers scan only local synthetic repositories with Trivy in this version.
+		ExecutionProperties properties = new ExecutionProperties();
+		properties.setPlannedScanners(List.of(ScannerType.TRIVY));
+
+		assertThatThrownBy(() -> properties.validate(new String[] { profile }))
+			.isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("TRIVY is not permitted with a production profile");
 	}
 
 	@ParameterizedTest

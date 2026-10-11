@@ -2,7 +2,8 @@
 
 Decision records: [ADR-0010](../adr/0010-scanner-adapters-repository-snapshots-and-findings.md)
 (architecture, Gitleaks), [ADR-0011](../adr/0011-semgrep-sast-with-a-bundled-ruleset.md)
-(Semgrep).
+(Semgrep), [ADR-0012](../adr/0012-trivy-sca-with-an-embedded-verified-database.md)
+(Trivy, embedded vulnerability database).
 Execution lifecycle: [execution-lifecycle.md](execution-lifecycle.md).
 
 ## Flow of one scanner job
@@ -14,9 +15,11 @@ worker.claim_job ─▶ JobLease (authoritative repository, commit, tenant)
 ScannerExecutor.execute(lease, stop)
    ├─ RepositorySource.snapshot(lease)     validated, bounded, immutable RepositorySnapshot
    ├─ adapter.prepare(snapshot)             minus scanner control files (e.g. .semgrepignore)
-   ├─ adapter.stdin(snapshot)               deterministic tar (repo/ + worker ruleset + path manifest)
+   ├─ adapter.stdin(snapshot)               deterministic tar (repo/ + worker ruleset + path manifest;
+   │                                        Trivy: dependency files + report template only)
    ├─ adapter.command(snapshot)             constant script, validated integer arguments
-   ├─ DockerSandbox.run(argv, stop, stdin)  fresh hardened container, killed on cancel/lease loss
+   ├─ DockerSandbox.run(argv, stop, stdin)  fresh hardened container of adapter.sandbox_image,
+   │                                        killed on cancel/lease loss
    │     └─ not EXITED ─▶ outcome_for(run)  timeout / limits / cancel / runtime failure
    └─ adapter.interpret(run, snapshot, lease)
          ├─ exit-code semantics             findings ≠ failure; errors ≠ clean
@@ -42,25 +45,31 @@ ExecutionLoop: worker.put_evidence(findings.json) ─▶ worker.submit_result(jo
 | `sentinel_worker/scanners/sandbox_input.py` | Shared script fragment: archive staging, listing checks, extraction, count and digest verification; shared exit codes; strict JSON loading |
 | `sentinel_worker/scanners/semgrep.py` | The Semgrep adapter (image, policy, ruleset catalog and validation, script, exit codes, parser, coverage cross-check) |
 | `sentinel_worker/scanners/semgrep-rules.json` | Bundled, reviewed Semgrep ruleset, pinned by SHA-256 |
-| `sentinel_worker/sandbox/policy.py` | Image allowlist, stdin limit, runtime arguments (`--interactive` only when allowed) |
+| `sentinel_worker/scanners/trivy.py` | The Trivy adapter (policy, input selection, report template, script, freshness, strict parser, dependency coverage) |
+| `sentinel_worker/scanners/trivy_image.py` | The Trivy image with an embedded database: lock, metadata and provenance validation, deterministic construction, content verification, bbolt structure check |
+| `sentinel_worker/scanners/trivy-base-config.json` | Vendored configuration blob of the pinned Trivy base image (linux/amd64), pinned by SHA-256 |
+| `sentinel_worker/sandbox/policy.py` | Image allowlist and the registry of content-verified local images, stdin limit, runtime arguments (`--interactive` only when allowed) |
 
-## The two adapters compared
+## The three adapters compared
 
-| | Gitleaks | Semgrep |
-|---|---|---|
-| What it reports | Secrets (`SECRET`) | Code patterns (`CODE_PATTERN`); not proof of exploitability |
-| Ruleset | Upstream default, derived without path allowlists | Authored here, 13 rules, validated catalog |
-| Repository control files removed | Root `.gitleaksignore` | Every `.semgrepignore` |
-| Extra input | Path manifest (detects secrets in names) | None |
-| Text from scanner output | Description sanitized, then kept | Never kept: catalog only |
-| Coverage | Snapshot skips | Snapshot skips plus per-language analysis cross-check |
-| Success exit codes | 0, 41, 42, 43 | 0, 41 |
-| Limits | 512 MiB, 128 PIDs, 96 MiB tmpfs | 1 GiB (256 MiB per file), 64 PIDs, 128 MiB tmpfs (measured) |
+| | Gitleaks | Semgrep | Trivy |
+|---|---|---|---|
+| What it reports | Secrets (`SECRET`) | Code patterns (`CODE_PATTERN`); not proof of exploitability | Dependency versions in advisories' affected ranges (`DEPENDENCY_VULNERABILITY`); not proof of reachability |
+| Rules or data | Upstream default, derived without path allowlists | Authored here, 13 rules, validated catalog | Vulnerability database in a verified image layer; freshness enforced |
+| Sandbox image | Pinned upstream image | Pinned upstream image | Local image: pinned base plus database layer, verified by content at start |
+| Repository control files removed | Root `.gitleaksignore` | Every `.semgrepignore` | Only dependency files are sent at all |
+| Extra input | Path manifest (detects secrets in names) | None | Report template |
+| Text from scanner output | Description sanitized, then kept | Never kept: catalog only | Identifiers and versions only (template); values validated and redacted |
+| Coverage | Snapshot skips | Snapshot skips plus per-language analysis cross-check | Per-manifest result check plus dependency counts (partial formats, unresolved versions, missing lockfiles, unsupported formats) |
+| Success exit codes | 0, 41, 42, 43 | 0, 41 | 0 (findings decided by the report) |
+| Limits | 512 MiB, 128 PIDs, 96 MiB tmpfs | 1 GiB (256 MiB per file), 64 PIDs, 128 MiB tmpfs (measured) | 512 MiB, 64 PIDs, 128 MiB tmpfs, 1 MiB report (measured) |
 
 ## Adding a scanner (checklist)
 
 1. **Review the scanner and pin its image** by index digest, cross-checked on every
    registry that publishes it, and add it to `ALLOWED_IMAGES` and CI's pre-pull list.
+   A scanner that needs data too large for stdin follows the Trivy pattern (ADR-0012): a
+   deterministic data layer on the pinned base, verified by content before use.
 2. **Verify its behavior on the pinned image before designing around it:**
    - configuration discovery, and any repository-controlled configuration or
      suppression files and comments;

@@ -12,7 +12,10 @@ synthetic repositories under ``SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR``. That l
 fixture source is the only repository input in this version, so Gitleaks is refused in
 production until a verified commit-snapshot source exists. The SEMGREP scanner
 (``SENTINEL_WORKER_SEMGREP_ENABLED=true``, ADR-0011) uses the same fixture source and the
-same production restriction.
+same production restriction. The TRIVY scanner (``SENTINEL_WORKER_TRIVY_ENABLED=true``,
+ADR-0012) additionally needs ``SENTINEL_WORKER_TRIVY_IMAGE_LOCK``: the lock file written by
+``sentinel-worker trivy-image build``. The lock is validated here; the image it names is
+verified by content when the worker starts, never trusted from configuration.
 """
 
 from __future__ import annotations
@@ -41,6 +44,8 @@ SANDBOX_PIDS_VAR = "SENTINEL_WORKER_SANDBOX_PIDS"
 SANDBOX_RUNTIME_VAR = "SENTINEL_WORKER_SANDBOX_RUNTIME"
 GITLEAKS_ENABLED_VAR = "SENTINEL_WORKER_GITLEAKS_ENABLED"
 SEMGREP_ENABLED_VAR = "SENTINEL_WORKER_SEMGREP_ENABLED"
+TRIVY_ENABLED_VAR = "SENTINEL_WORKER_TRIVY_ENABLED"
+TRIVY_IMAGE_LOCK_VAR = "SENTINEL_WORKER_TRIVY_IMAGE_LOCK"
 REPOSITORY_FIXTURES_DIR_VAR = "SENTINEL_WORKER_REPOSITORY_FIXTURES_DIR"
 EXECUTORS = ("sandbox", "inline")
 
@@ -60,6 +65,11 @@ class ExecutionSettings:
     gitleaks_policy: SandboxPolicy | None = None
     semgrep_enabled: bool = False
     semgrep_policy: SandboxPolicy | None = None
+    trivy_enabled: bool = False
+    trivy_image_lock: str | None = None
+    sandbox_timeout_seconds: float = 300.0
+    sandbox_cpus: float = 1.0
+    sandbox_runtime: str | None = None
 
     @classmethod
     def from_env(
@@ -71,8 +81,10 @@ class ExecutionSettings:
             raise ConfigurationError(f"{FIXTURE_ENABLED_VAR}=true is not permitted in production")
         gitleaks_enabled = _flag(env, GITLEAKS_ENABLED_VAR)
         semgrep_enabled = _flag(env, SEMGREP_ENABLED_VAR)
+        trivy_enabled = _flag(env, TRIVY_ENABLED_VAR)
         for name, enabled in ((GITLEAKS_ENABLED_VAR, gitleaks_enabled),
-                              (SEMGREP_ENABLED_VAR, semgrep_enabled)):  # fmt: skip
+                              (SEMGREP_ENABLED_VAR, semgrep_enabled),
+                              (TRIVY_ENABLED_VAR, trivy_enabled)):  # fmt: skip
             if enabled and environment is Environment.PRODUCTION:
                 # The only repository input is local fixtures (no verified commit
                 # snapshots yet), and runc is not a boundary for hostile code (ADR-0009).
@@ -80,11 +92,11 @@ class ExecutionSettings:
                     f"{name}=true is not permitted in production: repository "
                     "input is limited to local fixtures in this version"
                 )
-        if not (fixture_enabled or gitleaks_enabled or semgrep_enabled):
+        if not (fixture_enabled or gitleaks_enabled or semgrep_enabled or trivy_enabled):
             raise ConfigurationError(
                 f"no executable scanner is enabled; set {FIXTURE_ENABLED_VAR}=true, "
-                f"{GITLEAKS_ENABLED_VAR}=true or {SEMGREP_ENABLED_VAR}=true "
-                "(development and CI only)"
+                f"{GITLEAKS_ENABLED_VAR}=true, {SEMGREP_ENABLED_VAR}=true or "
+                f"{TRIVY_ENABLED_VAR}=true (development and CI only)"
             )
         executor = env.get(FIXTURE_EXECUTOR_VAR, "sandbox").strip().lower() or "sandbox"
         if executor not in EXECUTORS:
@@ -133,6 +145,11 @@ class ExecutionSettings:
             docker_cli = _docker_cli(env)
             fixtures_dir = _fixtures_dir(env)
             semgrep_policy = SemgrepAdapter().policy(timeout, cpus, runtime)
+        trivy_lock = None
+        if trivy_enabled:
+            docker_cli = _docker_cli(env)
+            fixtures_dir = _fixtures_dir(env)
+            trivy_lock = _trivy_lock(env)
         return cls(
             database=worker_database_settings(environment, env),
             poll_interval_seconds=_bounded(env, POLL_INTERVAL_VAR, 5.0, 0.1, 60.0),
@@ -147,6 +164,11 @@ class ExecutionSettings:
             gitleaks_policy=gitleaks_policy,
             semgrep_enabled=semgrep_enabled,
             semgrep_policy=semgrep_policy,
+            trivy_enabled=trivy_enabled,
+            trivy_image_lock=trivy_lock,
+            sandbox_timeout_seconds=timeout,
+            sandbox_cpus=cpus,
+            sandbox_runtime=runtime,
         )
 
 
@@ -165,6 +187,26 @@ def _fixtures_dir(env: Mapping[str, str]) -> str:
         raise ConfigurationError(
             f"{REPOSITORY_FIXTURES_DIR_VAR} must be the absolute path of an existing directory"
         )
+    return path
+
+
+def _trivy_lock(env: Mapping[str, str]) -> str:
+    """The Trivy image lock: an absolute path to a lock that parses (ADR-0012). The image it
+    names is verified by content at startup (sentinel_worker.scanners.trivy_image)."""
+    from sentinel_worker.scanners.trivy_image import ImageError, parse_lock
+
+    path = env.get(TRIVY_IMAGE_LOCK_VAR, "").strip()
+    if not path or not os.path.isabs(path) or not os.path.isfile(path) or os.path.islink(path):
+        raise ConfigurationError(
+            f"{TRIVY_IMAGE_LOCK_VAR} must be the absolute path of the Trivy image lock "
+            "(sentinel-worker trivy-image build)"
+        )
+    try:
+        with open(path, "rb") as handle:
+            parse_lock(handle.read(64 * 1024 + 1))
+    except (OSError, ImageError) as exc:
+        code = exc.code if isinstance(exc, ImageError) else "LOCK_UNREADABLE"
+        raise ConfigurationError(f"{TRIVY_IMAGE_LOCK_VAR} is not a valid lock ({code})") from None
     return path
 
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sentinelpipe.dev/schemas/messages/v1/findings.v1.schema.json",
   "title": "Normalized findings v1",
-  "description": "Evidence document produced by the worker from one scanner run (ADR-0010): normalized, redacted findings plus the input and coverage they apply to. Stored as the `findings.json` artifact of a job result (ADR-0008). Canonical serialization (UTF-8/ASCII, keys sorted, no whitespace); findings sorted by path, line, column, rule and fingerprint. Findings are observations, not a security decision: a document without findings does not mean PASS, and findings do not by themselves mean FAIL (policy evaluation, M4). Severity, confidence and remediation are null unless the scanner itself provides them; a scanner's own severity label is kept verbatim in the optional `scanner_severity` and is not a policy decision. Code-pattern findings (Semgrep) indicate code associated with a vulnerability class, not proven exploitability. No finding carries a source or secret excerpt. Secret findings never carry an excerpt of the detected value. Paths are persisted only in a safe form: components that look like or were detected as secrets are replaced by `[redacted-N]` labels (best-effort, not a guarantee).",
+  "description": "Evidence document produced by the worker from one scanner run (ADR-0010): normalized, redacted findings plus the input and coverage they apply to. Stored as the `findings.json` artifact of a job result (ADR-0008). Canonical serialization (UTF-8/ASCII, keys sorted, no whitespace); findings sorted by path, line, column, rule and fingerprint. Findings are observations, not a security decision: a document without findings does not mean PASS, and findings do not by themselves mean FAIL (policy evaluation, M4). Severity, confidence and remediation are null unless the scanner itself provides them; a scanner's own severity label is kept verbatim in the optional `scanner_severity` and is not a policy decision. Code-pattern findings (Semgrep) indicate code associated with a vulnerability class, not proven exploitability. Dependency findings (Trivy) indicate a dependency version affected by a published advisory in the recorded, point-in-time vulnerability database; they do not prove that the vulnerable code is reachable, and advisories published after the database's `updated_at` are not covered. No finding carries a source or secret excerpt. Secret findings never carry an excerpt of the detected value. Paths are persisted only in a safe form: components that look like or were detected as secrets are replaced by `[redacted-N]` labels (best-effort, not a guarantee).",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "scanner", "context", "input", "coverage", "execution", "finding_count", "findings"],
@@ -96,6 +96,21 @@
           "description": "Optional: scanned files in languages the scanner or its ruleset does not cover; they were not analyzed.",
           "$ref": "#/$defs/fileCount"
         },
+        "dependencies": {
+          "description": "Optional (dependency scanners, Trivy): package-level coverage counts. packages: packages the scanner identified in analyzed manifests. packages_unresolved: non-root packages whose version cannot be compared with advisory ranges (missing, an unresolved property, or outside the ecosystem's version grammar), so no advisory can match them. packages_development: packages marked as development dependencies. manifests_partial: analyzed formats that resolve only part of the dependency graph offline (pom.xml, requirements.txt). manifests_lockfile_missing: dependency declarations (package.json, pyproject.toml, Pipfile, setup.py, setup.cfg, build.gradle, build.gradle.kts) without a supported lockfile in their directory or an ancestor. unsupported_dependency_files: dependency manifests of formats or ecosystems that were not analyzed. binary_artifacts: JAR/WAR/EAR/PAR, wheel and egg files, which are not analyzed. Counts only: no package names, versions or paths.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["packages", "packages_unresolved", "packages_development", "manifests_partial", "manifests_lockfile_missing", "unsupported_dependency_files", "binary_artifacts"],
+          "properties": {
+            "packages": { "$ref": "#/$defs/count" },
+            "packages_unresolved": { "$ref": "#/$defs/count" },
+            "packages_development": { "$ref": "#/$defs/count" },
+            "manifests_partial": { "$ref": "#/$defs/fileCount" },
+            "manifests_lockfile_missing": { "$ref": "#/$defs/fileCount" },
+            "unsupported_dependency_files": { "$ref": "#/$defs/fileCount" },
+            "binary_artifacts": { "$ref": "#/$defs/fileCount" }
+          }
+        },
         "not_analyzed_reasons": {
           "description": "Optional: why supported files were not analyzed, per reason; a file can count under several. scanner_skipped: absent from the scanner's list of analyzed files. parse_error: the scanner reported a parse error, or an independent syntax check failed. resource_limit: per-file timeout or memory limit. unverifiable_encoding: NUL bytes or a UTF-16/UTF-32 byte order mark (the scanner's result cannot be trusted).",
           "type": "object",
@@ -110,10 +125,10 @@
         },
         "limitations": {
           "type": "array",
-          "maxItems": 16,
+          "maxItems": 24,
           "uniqueItems": true,
           "items": {
-            "enum": ["FILES_SKIPPED", "EMPTY_INPUT", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "ARCHIVES_NOT_SCANNED", "RULESET_DEFAULT_ONLY", "FILES_NOT_ANALYZED", "UNSUPPORTED_FILES_PRESENT", "NO_SUPPORTED_FILES", "RULESET_MINIMAL", "PATTERN_MATCHING_ONLY", "PARSE_COMPLETENESS_UNVERIFIED"]
+            "enum": ["FILES_SKIPPED", "EMPTY_INPUT", "COMMIT_NOT_VERIFIED", "GIT_HISTORY_NOT_SCANNED", "ARCHIVES_NOT_SCANNED", "RULESET_DEFAULT_ONLY", "FILES_NOT_ANALYZED", "UNSUPPORTED_FILES_PRESENT", "NO_SUPPORTED_FILES", "RULESET_MINIMAL", "PATTERN_MATCHING_ONLY", "PARSE_COMPLETENESS_UNVERIFIED", "ADVISORY_DATA_POINT_IN_TIME", "REACHABILITY_NOT_ANALYZED", "VULNERABILITY_DB_STALE", "SYNTHETIC_VULNERABILITY_DATABASE", "PARTIAL_DEPENDENCY_RESOLUTION", "UNRESOLVED_DEPENDENCY_VERSIONS", "DEPENDENCY_LOCKFILE_MISSING", "UNSUPPORTED_DEPENDENCY_FORMATS_PRESENT", "BINARY_ARTIFACTS_NOT_ANALYZED", "PACKAGE_VALUES_REDACTED", "PYPI_NAME_MATCHING_UNVERIFIED", "DEVELOPMENT_DEPENDENCIES_NOT_ANALYZED"]
           }
         }
       }
@@ -134,6 +149,56 @@
         }
       }
     },
+    "vulnerability_database": {
+      "description": "Optional (Trivy): the vulnerability database the scan used, verified by the worker before use (ADR-0012). updated_at is when its advisory data was compiled; advisories published later are not covered. age_seconds is measured at scan time by the worker; freshness is FRESH up to 48 hours and STALE up to 7 days (older databases fail the scan). source records the provenance established when the database was prepared: the upstream OCI artifact by digest, or a synthetic test fixture.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "updated_at", "next_update", "age_seconds", "freshness", "trivy_db_sha256", "metadata_sha256", "source", "image"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "updated_at": { "$ref": "#/$defs/timestamp" },
+        "next_update": { "$ref": "#/$defs/timestamp" },
+        "age_seconds": { "type": "integer", "minimum": 0, "maximum": 604800 },
+        "freshness": { "enum": ["FRESH", "STALE"] },
+        "trivy_db_sha256": { "$ref": "#/$defs/sha256" },
+        "metadata_sha256": { "$ref": "#/$defs/sha256" },
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "repository", "manifest_digest", "blob_digest"],
+              "properties": {
+                "kind": { "const": "UPSTREAM_OCI" },
+                "repository": { "const": "ghcr.io/aquasecurity/trivy-db" },
+                "manifest_digest": { "$ref": "#/$defs/digest" },
+                "blob_digest": { "$ref": "#/$defs/digest" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "builder", "advisories_sha256"],
+              "properties": {
+                "kind": { "const": "SYNTHETIC_FIXTURE" },
+                "builder": { "type": "string", "pattern": "^[a-z0-9./-]{1,128}@v[0-9A-Za-z.+-]{1,64}$" },
+                "advisories_sha256": { "$ref": "#/$defs/sha256" }
+              }
+            }
+          ]
+        },
+        "image": {
+          "description": "The verified local scanner image (base image plus database layer): its configuration digest (store-independent) and the image id it was run as.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["config_digest", "id"],
+          "properties": {
+            "config_digest": { "$ref": "#/$defs/digest" },
+            "id": { "$ref": "#/$defs/digest" }
+          }
+        }
+      }
+    },
     "finding_count": { "type": "integer", "minimum": 0, "maximum": 1000 },
     "findings": {
       "type": "array",
@@ -144,11 +209,15 @@
   "$defs": {
     "uuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+    "advisoryId": { "type": "string", "pattern": "^[A-Z][A-Z0-9]{1,15}(-[A-Za-z0-9._]{1,32}){1,4}$" },
+    "packageValue": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$" },
     "count": { "type": "integer", "minimum": 0, "maximum": 1000000 },
     "fileCount": { "type": "integer", "minimum": 0, "maximum": 5000 },
     "line": { "type": ["integer", "null"], "minimum": 1, "maximum": 10000000 },
     "column": { "type": ["integer", "null"], "minimum": 0, "maximum": 10000000 },
-    "scannerName": { "enum": ["gitleaks", "semgrep"] },
+    "scannerName": { "enum": ["gitleaks", "semgrep", "trivy"] },
     "scannerVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
     "finding": {
       "type": "object",
@@ -174,12 +243,37 @@
         },
         "rule_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
         "category": {
-          "description": "SECRET: a detected secret (Gitleaks). CODE_PATTERN: code matching a rule associated with a vulnerability class (Semgrep); not proof of exploitability.",
-          "enum": ["SECRET", "CODE_PATTERN"]
+          "description": "SECRET: a detected secret (Gitleaks). CODE_PATTERN: code matching a rule associated with a vulnerability class (Semgrep); not proof of exploitability. DEPENDENCY_VULNERABILITY: a dependency version affected by a published advisory (Trivy); `rule_id` is the advisory id; not proof that the vulnerable code is reachable.",
+          "enum": ["SECRET", "CODE_PATTERN", "DEPENDENCY_VULNERABILITY"]
         },
         "scanner_severity": {
-          "description": "Optional: the scanner's own severity label, verbatim (Semgrep: ERROR, WARNING, INFO). Not mapped onto `severity` and not a policy decision.",
-          "enum": ["ERROR", "WARNING", "INFO"]
+          "description": "Optional: the scanner's own severity label, verbatim (Semgrep: ERROR, WARNING, INFO; Trivy: CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN, as selected by Trivy from the advisory sources). Not mapped onto `severity` and not a policy decision.",
+          "enum": ["ERROR", "WARNING", "INFO", "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+        },
+        "package": {
+          "description": "Optional (dependency findings): the affected package as declared in the manifest. Values come from repository lockfiles and are validated; token-like runs are replaced by [redacted] (`redacted`). fixed_versions come from the advisory database (empty when no fix is known). development is the scanner's development-dependency marker (null when the format does not record it).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ecosystem", "name", "installed_version", "fixed_versions", "development", "redacted"],
+          "properties": {
+            "ecosystem": { "enum": ["maven", "npm", "pypi"] },
+            "name": { "$ref": "#/$defs/packageValue" },
+            "installed_version": { "$ref": "#/$defs/packageValue" },
+            "fixed_versions": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/packageValue" } },
+            "development": { "type": ["boolean", "null"] },
+            "redacted": { "type": "boolean" }
+          }
+        },
+        "advisory": {
+          "description": "Optional (dependency findings): advisory metadata from the verified vulnerability database. aliases are the other identifiers of the same advisory (for example a GHSA id when rule_id is the CVE id). No advisory prose or URLs are stored.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["aliases", "data_source", "status"],
+          "properties": {
+            "aliases": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "$ref": "#/$defs/advisoryId" } },
+            "data_source": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+            "status": { "enum": [null, "fixed", "affected", "under_investigation", "will_not_fix", "fix_deferred", "end_of_life", "not_affected", "unknown"] }
+          }
         },
         "classification": {
           "description": "Optional: weakness classes the rule is associated with, taken from the reviewed, bundled ruleset (never from scanner output).",
@@ -198,8 +292,8 @@
           "required": ["target", "path", "path_redacted", "start_line", "end_line", "start_column", "end_column"],
           "properties": {
             "target": {
-              "description": "FILE_CONTENT: the secret is in the file's content (lines and columns set). FILE_PATH: the secret is in the file's path (lines and columns null; the path is redacted).",
-              "enum": ["FILE_CONTENT", "FILE_PATH"]
+              "description": "FILE_CONTENT: the finding is in the file's content (lines and columns set). FILE_PATH: the secret is in the file's path (lines and columns null; the path is redacted). DEPENDENCY_MANIFEST: the finding concerns a dependency declared in this manifest or lockfile (lines and columns null).",
+              "enum": ["FILE_CONTENT", "FILE_PATH", "DEPENDENCY_MANIFEST"]
             },
             "path_redacted": { "type": "boolean" },
             "path": {
@@ -224,6 +318,15 @@
               "then": {
                 "properties": {
                   "path_redacted": { "const": true },
+                  "start_line": { "const": null }, "end_line": { "const": null },
+                  "start_column": { "const": null }, "end_column": { "const": null }
+                }
+              }
+            },
+            {
+              "if": { "properties": { "target": { "const": "DEPENDENCY_MANIFEST" } } },
+              "then": {
+                "properties": {
                   "start_line": { "const": null }, "end_line": { "const": null },
                   "start_column": { "const": null }, "end_column": { "const": null }
                 }
@@ -264,7 +367,7 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "category": { "enum": ["SECRET", "CODE_PATTERN"] } } },
+          "if": { "properties": { "category": { "enum": ["SECRET", "CODE_PATTERN", "DEPENDENCY_VULNERABILITY"] } } },
           "then": {
             "properties": {
               "evidence": {
@@ -272,6 +375,17 @@
               }
             }
           }
+        },
+        {
+          "if": { "properties": { "category": { "const": "DEPENDENCY_VULNERABILITY" } }, "required": ["category"] },
+          "then": {
+            "required": ["package", "advisory", "scanner_severity"],
+            "properties": {
+              "rule_id": { "$ref": "#/$defs/advisoryId" },
+              "location": { "properties": { "target": { "const": "DEPENDENCY_MANIFEST" } } }
+            }
+          },
+          "else": { "not": { "anyOf": [{ "required": ["package"] }, { "required": ["advisory"] }] } }
         }
       ]
     }
