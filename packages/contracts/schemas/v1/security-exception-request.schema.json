@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/security-exception-request.schema.json",
+  "title": "Request a security exception",
+  "description": "Asks to accept one blocking finding of a scan's original FAIL evaluation (ADR-0015). The finding is named by scanner and fingerprint only: the server derives the evaluation, policy version, engine version, job and evidence digests, rule, category and severity from the stored records, and refuses a fingerprint that is not exactly one blocking finding of a violated scanner in that evidence. The requester is the caller's server-side identity; requester, approver, state and binding fields are never accepted (unknown properties are rejected). Missing or invalid evidence, scanner failures, incomplete coverage and other INCOMPLETE conditions can never be excepted. The request has no effect until an OWNER other than the requester approves it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scanner", "findingFingerprint", "justification", "expiresAt"],
+  "properties": {
+    "scanner": {
+      "description": "The scanner whose violation the finding belongs to.",
+      "enum": ["GITLEAKS", "SEMGREP", "TRIVY"]
+    },
+    "findingFingerprint": {
+      "description": "The finding's findings.v1 fingerprint (no wildcards).",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "justification": {
+      "description": "Why the risk is acceptable until the expiry, and how it is tracked. Shown to every member who can read the scan: never include secret values. No control characters, no leading or trailing whitespace.",
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 2000
+    },
+    "expiresAt": {
+      "description": "When the exception stops applying: at least 1 hour and 1 minute and at most 90 days after the request, measured by the database clock.",
+      "$ref": "common.schema.json#/$defs/timestamp"
+    }
+  }
+}

@@ -1,4 +1,4 @@
-# Runbook: security policy engine (M4 Phases 1 and 2)
+# Runbook: security policy engine (M4 Phases 1 to 3)
 
 Operational notes for [ADR-0013](../adr/0013-security-policy-engine.md). Commands are
 PowerShell-compatible; SQL is run with a read-only or administrative session as noted.
@@ -137,3 +137,43 @@ WHERE v.definition_sha256 <> h.policy_sha256;
 ```
 
 Both counts must be `0`; the triggers listed in section 5 include the two new tables.
+
+## 8. Security exceptions
+
+[ADR-0015](../adr/0015-security-exceptions-and-independent-approval.md) (proposed).
+
+**Flow.** An ADMIN or OWNER requests an exception for one blocking finding of a FAIL scan
+(the fingerprint is in the scan's `findings.json`; reviewers read it from the evidence, not
+from the requester). A different OWNER approves or rejects. The requester can withdraw a
+pending request; any OWNER can revoke an approval. Check the result with
+`GET /api/v1/scans/{scanId}/gate`.
+
+**Operational limitations.**
+
+- Exceptions are per scan: a re-run of the same commit needs new exceptions.
+- They expire on their own (database clock); nothing runs in the background. Expired
+  requests stay readable with status `EXPIRED`.
+- An organization needs at least two OWNERs to approve an OWNER's request.
+- Purging a scan's evidence (retention) closes its effective gate
+  (`ORIGINAL_NOT_REPRODUCIBLE`) and blocks approvals; ACTIVE exceptions stay recorded but
+  no longer apply.
+- Approvals do not lapse when the approver's membership changes; revoke explicitly.
+- `RISK_ACCEPTED` is not `PASS`, and nothing consumes the effective gate yet.
+- Justifications and rationales are visible to every member of the organization and
+  stored indefinitely: never paste secret values.
+
+**Diagnosis.**
+
+```sql
+-- Status of every request of a scan at the database clock.
+SELECT id, scanner_type, finding_fingerprint, state, status, requested_by, expires_at
+FROM policy.exception_status WHERE scan_id = '<scan id>' ORDER BY requested_at, id;
+-- Transition history of one request.
+SELECT seq, from_state, to_state, actor, actor_role, occurred_at, recorded_by
+FROM policy.exception_transitions WHERE request_id = '<id>' ORDER BY seq;
+```
+
+A request with status `INVALID` has no transition: it was inserted outside
+`policy.request_exception` (only possible for the schema owner or a superuser). Treat it as
+a tampering signal. Records cannot be corrected in place (append-only); revoke an approval
+instead.

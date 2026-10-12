@@ -1,6 +1,6 @@
 # ADR-0014: Historical policy re-evaluation
 
-- **Status:** Proposed (pending owner review and a successful remote CI run)
+- **Status:** Accepted (2026-10-11; see [Acceptance](#acceptance)). Proposed until then.
 - **Date:** 2026-10-11
 - **Milestone:** M4 Phase 2
 - **Builds on:** [ADR-0013](0013-security-policy-engine.md) (policy engine, accepted
@@ -254,6 +254,46 @@ only.
   loopback-only.
 - **H8 No rate limiting.** An ADMIN can request up to 100 re-evaluations per scan, each
   reading up to 16 × 1 MiB of evidence; the API has no rate limiting yet.
+
+## Acceptance
+
+- **Decision:** Accepted.
+- **Date:** 2026-10-11.
+- **Decision owner:** the repository owner (recorded on the owner's instruction; no
+  restriction is waived and no residual risk is downgraded).
+- **Supporting CI:** reported by the repository owner as a successful remote run of the M4
+  Phase 2 change (commit `c596a38`, "feat(policy): add immutable historical policy
+  re-evaluation (M4 Phase 2)", the `main` HEAD at acceptance). The run number and job
+  results were **not independently verified**: the only CI log archive available locally
+  (`logs_103386494867.zip`, git-ignored) belongs to commit `7b2c42f` (M3), not to
+  `c596a38`. The acceptance therefore rests on the owner's report, the
+  [M4 Phase 2 security review](../security/m4-phase2-security-review.md) and its local
+  verification (788 API tests, 16 E2E tests, worker and sandbox suites, all passing).
+- **Accepted decisions:**
+  - historical re-evaluations are separate, immutable, **non-gating** records
+    (`policy.historical_evaluations`); the original evaluation and the scan's decision never
+    change, and only the `ORIGINAL` record is gating;
+  - identity and idempotency: `(scan, policy version, engine version, inputs fingerprint)`,
+    with the fingerprint computed by PostgreSQL over the evidence of record and the as-of
+    instant; a repeat returns the existing record, a different result for the same identity
+    is refused (`NONDETERMINISTIC`), changed evidence or a new engine yields a new record;
+  - re-evaluation is granted to ADMIN and OWNER (`REEVALUATE_SCANS`).
+- **Residual risks accepted as documented** (H1 to H8, unchanged): H1 database superuser
+  trust; H2 API process trust; H3 integrity, not authenticity, of historical evidence; H4
+  old engine versions not executable; H5 historical decisions relative to the chosen
+  version's limitations (an ADMIN can obtain a non-gating historical PASS from a permissive
+  version); H6 purged evidence cannot be re-verified and records have no erasure procedure;
+  H7 no production authorization for hostile repositories; H8 no rate limiting.
+- **Non-production restrictions:** unchanged. Scanners run on local synthetic fixtures
+  only; Trivy stays disabled in production; Docker/runc is not a boundary for hostile
+  repositories; the domain API stays disabled by default and loopback-only. Historical
+  records cannot authorize a deployment or a merge.
+- **Future remediation work:** signed evidence or attestations with an external
+  append-only audit sink (H1 to H3, M6/M7); rate limiting (H8, M7); a data-retention and
+  erasure design covering every append-only audit table (H6); consumers (M5) must use the
+  scan's decision or the effective gate of
+  [ADR-0015](0015-security-exceptions-and-independent-approval.md), never a historical
+  record.
 
 ## Alternatives considered
 

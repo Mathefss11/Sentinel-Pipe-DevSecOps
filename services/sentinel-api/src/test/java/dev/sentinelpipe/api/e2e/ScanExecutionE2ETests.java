@@ -684,6 +684,103 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 		assertThat(history.toString()).doesNotContain(syntheticToken('R'));
 	}
 
+	/**
+	 * M4 Phase 3 with real components (ADR-0015): a secret found by a real Gitleaks run,
+	 * gated FAIL, is excepted by an ADMIN's request and an independent OWNER's approval. The
+	 * fingerprint is read from the stored evidence, as a reviewer would see it; the database
+	 * verifies it against the stored bytes. The effective gate is RISK_ACCEPTED (never PASS)
+	 * while the scan's decision stays FAIL, and closes again on revocation. No scanner job is
+	 * planned and no message is published.
+	 */
+	@Test
+	void aRealSecretIsExceptedOnlyWithIndependentApprovalAndTheScanStaysFail() throws Exception {
+		String repository = "excepted-leaky-" + UUID.randomUUID().toString().substring(0, 8);
+		Path root = Files.createDirectories(this.fixtures.resolve("acme").resolve(repository).resolve("src"));
+		Files.writeString(root.resolve("settings.py"), "TOKEN = \"" + syntheticToken('X') + "\"\n",
+				StandardCharsets.UTF_8);
+		UUID organizationId = createOrganization();
+		UUID projectId = createProject(organizationId, repository);
+		String requester = "e2e-requester-" + UUID.randomUUID();
+		grant(organizationId, requester, "ADMIN");
+		String policyId = json(postJson("/api/v1/organizations/" + organizationId + "/policies",
+				dev.sentinelpipe.api.policy.PolicyFixtures.gitleaksOnly("secrets")))
+			.get("id")
+			.asString();
+		this.mockMvc
+			.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+				.put("/api/v1/projects/{id}/policy", projectId)
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content("{\"policyVersionId\": \"%s\"}".formatted(policyId)))
+			.andExpect(status().isOk());
+		UUID scanId = UUID.fromString(json(requestScan(projectId, randomSha(), null)).get("id").asString());
+		this.lifecycle.planJob(scanId, ScannerType.GITLEAKS);
+		finish(startWorker(0, gitleaksWorker(), "--idle-timeout", "3"));
+		this.supervisor.runOnce();
+		assertThat(scan(scanId).get("securityDecision").asString()).isEqualTo("FAIL");
+		long outbox = this.jdbcTemplate.queryForObject("SELECT count(*) FROM outbox_events", Long.class);
+		String fingerprint = this.jdbcTemplate.queryForObject("""
+				SELECT convert_from(o.content, 'UTF8')::jsonb -> 'findings' -> 0 ->> 'fingerprint'
+				FROM evidence.objects o JOIN evidence.job_artifacts u
+				  ON u.organization_id = o.organization_id AND u.sha256 = o.sha256
+				JOIN scan_jobs j ON j.id = u.job_id WHERE j.scan_id = ? AND u.name = 'findings.json'""", String.class,
+				scanId);
+		String body = """
+				{"scanner": "GITLEAKS", "findingFingerprint": "%s", "justification": "Synthetic E2E token, never valid.",
+				 "expiresAt": "%s"}""".formatted(fingerprint, Instant.now().plus(Duration.ofDays(7)));
+
+		JsonNode request = json(this.mockMvc
+			.perform(post("/api/v1/scans/{id}/exceptions", scanId)
+				.header(org.springframework.http.HttpHeaders.AUTHORIZATION, dev.sentinelpipe.api.TestJwts.bearer(requester))
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content(body))
+			.andExpect(status().isCreated())
+			.andReturn());
+		String id = request.get("id").asString();
+		String rationale = "{\"rationale\": \"Reviewed the synthetic token.\"}";
+		this.mockMvc
+			.perform(post("/api/v1/scans/{id}/exceptions/{e}/approve", scanId, id)
+				.header(org.springframework.http.HttpHeaders.AUTHORIZATION, dev.sentinelpipe.api.TestJwts.bearer(requester))
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content(rationale))
+			.andExpect(status().isForbidden());
+		JsonNode approved = json(this.mockMvc
+			.perform(post("/api/v1/scans/{id}/exceptions/{e}/approve", scanId, id)
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content(rationale))
+			.andExpect(status().isOk())
+			.andReturn());
+		JsonNode gate = json(this.mockMvc
+			.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/v1/scans/{id}/gate",
+					scanId))
+			.andExpect(status().isOk())
+			.andReturn());
+
+		ContractSchemas.assertValid("security-exception.schema.json", approved);
+		ContractSchemas.assertValid("effective-gate.schema.json", gate);
+		assertThat(request.at("/finding/category").asString()).isEqualTo("SECRET");
+		assertThat(approved.get("status").asString()).isEqualTo("ACTIVE");
+		assertThat(gate.get("effectiveDecision").asString()).isEqualTo("RISK_ACCEPTED");
+		assertThat(gate.get("originalDecision").asString()).isEqualTo("FAIL");
+		assertThat(scan(scanId).get("securityDecision").asString()).isEqualTo("FAIL");
+		assertThat(approved.toString()).doesNotContain(syntheticToken('X')).doesNotContain("settings.py");
+		assertThat(gate.toString()).doesNotContain(syntheticToken('X'));
+
+		this.mockMvc
+			.perform(post("/api/v1/scans/{id}/exceptions/{e}/revoke", scanId, id)
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content(rationale))
+			.andExpect(status().isOk());
+		assertThat(json(this.mockMvc
+			.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/v1/scans/{id}/gate",
+					scanId))
+			.andExpect(status().isOk())
+			.andReturn()).get("effectiveDecision").asString()).isEqualTo("FAIL");
+		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM scan_jobs WHERE scan_id = ?", Long.class,
+				scanId))
+			.isEqualTo(1);
+		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM outbox_events", Long.class)).isEqualTo(outbox);
+	}
+
 	private static Path trivyLock() {
 		String lock = System.getProperty("sentinel.e2e.trivy-lock", "");
 		if (lock.isBlank() || lock.contains("${") || !Files.isRegularFile(Path.of(lock))) {

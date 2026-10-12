@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/security-exception.schema.json",
+  "title": "Security exception",
+  "description": "A request to accept one verified blocking finding of one scan's original FAIL evaluation, with its immutable transition history (ADR-0015). `state` is the last recorded transition; `status` is what applies at the database clock (`statusAsOf`): only ACTIVE (approved, not revoked, unexpired) can affect the effective gate. An exception never changes the scan's decision, its evidence, its original evaluation or any historical re-evaluation. Values are identifiers, digests and codes; no evidence content, paths or secret values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id", "scanId", "projectId", "evaluationId", "policyVersionId", "policySha256", "engineVersion", "scannerType",
+    "jobId", "leaseEpoch", "artifactSha256", "resultSha256", "finding", "justification", "requestedBy", "requestedAt",
+    "expiresAt", "state", "status", "statusAsOf", "transitions"
+  ],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/uuid" },
+    "scanId": { "$ref": "common.schema.json#/$defs/uuid" },
+    "projectId": { "$ref": "common.schema.json#/$defs/uuid" },
+    "evaluationId": {
+      "description": "The scan's ORIGINAL (gating) evaluation; never a historical re-evaluation.",
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "policyVersionId": {
+      "description": "The policy version pinned to the scan.",
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "policySha256": { "$ref": "#/$defs/sha256" },
+    "engineVersion": { "type": "string", "pattern": "^[a-z0-9][a-z0-9./-]{0,39}$" },
+    "scannerType": { "enum": ["GITLEAKS", "SEMGREP", "TRIVY"] },
+    "jobId": { "$ref": "common.schema.json#/$defs/uuid" },
+    "leaseEpoch": { "type": "integer", "minimum": 1 },
+    "artifactSha256": {
+      "description": "Digest of the findings.json evidence of record the finding was verified in.",
+      "$ref": "#/$defs/sha256"
+    },
+    "resultSha256": { "$ref": "#/$defs/sha256" },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint", "ruleId", "category", "scannerSeverity"],
+      "properties": {
+        "fingerprint": { "$ref": "#/$defs/sha256" },
+        "ruleId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+        "category": { "enum": ["SECRET", "CODE_PATTERN", "DEPENDENCY_VULNERABILITY"] },
+        "scannerSeverity": {
+          "description": "The scanner's own label; null for Gitleaks.",
+          "enum": [null, "ERROR", "WARNING", "INFO", "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+        }
+      }
+    },
+    "justification": { "type": "string", "minLength": 20, "maxLength": 2000 },
+    "requestedBy": { "$ref": "#/$defs/identity" },
+    "requestedAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "expiresAt": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "state": {
+      "description": "The last recorded transition; INVALID only for a stored request without any transition (never written by the API), which never applies.",
+      "enum": ["REQUESTED", "APPROVED", "REJECTED", "WITHDRAWN", "REVOKED", null]
+    },
+    "status": {
+      "description": "ACTIVE: approved and unexpired. EXPIRED: REQUESTED or APPROVED at or after expiresAt (derived from the database clock; no transition is recorded).",
+      "enum": ["REQUESTED", "ACTIVE", "EXPIRED", "REJECTED", "WITHDRAWN", "REVOKED", "INVALID"]
+    },
+    "statusAsOf": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "transitions": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sequence", "fromState", "toState", "actor", "actorRole", "rationale", "occurredAt"],
+        "properties": {
+          "sequence": { "type": "integer", "minimum": 0, "maximum": 2 },
+          "fromState": { "enum": [null, "REQUESTED", "APPROVED"] },
+          "toState": { "enum": ["REQUESTED", "APPROVED", "REJECTED", "WITHDRAWN", "REVOKED"] },
+          "actor": { "$ref": "#/$defs/identity" },
+          "actorRole": {
+            "description": "The actor's organization role when the transition was recorded, verified by the database.",
+            "enum": ["OWNER", "ADMIN"]
+          },
+          "rationale": { "type": ["string", "null"], "maxLength": 1000 },
+          "occurredAt": { "$ref": "common.schema.json#/$defs/timestamp" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "identity": {
+      "description": "Internal identity reference; never a name, e-mail address or token subject.",
+      "type": "string",
+      "pattern": "^user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  }
+}

@@ -536,4 +536,53 @@ class PolicyEvaluatorTests {
 		assertThat(reasons).matches("[\\x20-\\x7e]+");
 	}
 
+
+	// --- Blocking findings for security exceptions (ADR-0015) ------------------------------
+
+	@Test
+	void assessmentListsExactlyTheCountedBlockingFindingsWithoutChangingTheDecision() {
+		List<JobEvidence> jobs = cleanJobs();
+		jobs.set(0, completed(ScannerType.GITLEAKS, findings(PolicyScanner.GITLEAKS).finding("x").finding("x").bytes()));
+		jobs.set(1, completed(ScannerType.SEMGREP,
+				findings(PolicyScanner.SEMGREP).finding("ERROR").finding("INFO").finding("WARNING").bytes()));
+		PolicyDefinition policy = PolicyFixtures.parse(PolicyFixtures.allScanners("baseline"));
+
+		PolicyEvaluator.Assessment assessment = this.evaluator.assess(policy, this.scan, jobs);
+
+		assertThat(assessment.evaluation()).isEqualTo(this.evaluator.evaluate(policy, this.scan, jobs));
+		assertThat(assessment.blockingFindings().get(ScannerType.GITLEAKS)).hasSize(2)
+			.allSatisfy((finding) -> assertThat(finding.scannerSeverity()).isNull())
+			.extracting(PolicyEvaluator.BlockingFinding::category)
+			.containsOnly("SECRET");
+		// INFO is not blocking under this policy: two of three Semgrep findings are counted.
+		assertThat(assessment.blockingFindings().get(ScannerType.SEMGREP))
+			.extracting(PolicyEvaluator.BlockingFinding::scannerSeverity)
+			.containsExactly("ERROR", "WARNING");
+		assertThat(assessment.blockingFindings().get(ScannerType.TRIVY)).isEmpty();
+		// The counts behind each violation are exactly the listed findings.
+		List<Reason> violations = assessment.evaluation()
+			.reasons()
+			.stream()
+			.filter((reason) -> reason.effect() == ReasonEffect.VIOLATION)
+			.toList();
+		assertThat(violations).hasSize(2);
+		for (Reason reason : violations) {
+			assertThat(reason.observed()).isEqualTo((long) assessment.blockingFindings().get(reason.scanner()).size());
+		}
+	}
+
+	@Test
+	void discardedEvidenceContributesNoBlockingFindings() {
+		List<JobEvidence> jobs = cleanJobs();
+		JobContext foreign = new JobContext(UUID.randomUUID(), this.scan.projectId(), this.scan.scanId(),
+				context(ScannerType.GITLEAKS).jobId(), this.scan.commitSha());
+		jobs.set(0, completed(ScannerType.GITLEAKS, new Findings(PolicyScanner.GITLEAKS, foreign).finding("x").bytes()));
+
+		PolicyEvaluator.Assessment assessment = this.evaluator
+			.assess(PolicyFixtures.parse(PolicyFixtures.allScanners("baseline")), this.scan, jobs);
+
+		assertThat(assessment.evaluation().decision()).isEqualTo(PolicyDecision.INCOMPLETE);
+		assertThat(assessment.blockingFindings()).doesNotContainKey(ScannerType.GITLEAKS);
+	}
+
 }

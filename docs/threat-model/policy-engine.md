@@ -1,4 +1,4 @@
-# Threat model: security policy engine (M4 Phases 1 and 2)
+# Threat model: security policy engine (M4 Phases 1 to 3)
 
 - **Scope:** policy versions, activation, scan pinning, evaluation and evaluation records
   ([ADR-0013](../adr/0013-security-policy-engine.md)); Flyway V009; the
@@ -102,3 +102,31 @@ Scope: [ADR-0014](../adr/0014-historical-policy-re-evaluation.md), Flyway V010,
 | H-T12 | Repudiation | Ambiguous engine version | Engine version stored and part of the identity; different results for one identity refused | forgery test (`sentinelpipe-policy/9.9.9`) | Old engines not executable (H4) |
 
 Residual risks H1 to H8 are listed in ADR-0014.
+
+## M4 Phase 3: security exceptions
+
+Design: [ADR-0015](../adr/0015-security-exceptions-and-independent-approval.md);
+review: [M4 Phase 3](../security/m4-phase3-security-review.md).
+
+**New assets:** exception requests and their transitions (who accepted which risk until
+when); the effective gate result. **New trust boundary:** the approver's identity and role,
+derived by the API from the token and re-verified by PostgreSQL against current
+memberships.
+
+| Threat (STRIDE) | Mitigation | Residual |
+|---|---|---|
+| Self-approval (E) | API `403`; function `SELF_DECISION`; CHECK `actor <> requested_by` for APPROVED and REJECTED, also for superusers' ordinary statements | One human with two IdP identities (E3) |
+| Forged requester or approver (S) | Identity from the validated token's `(iss, sub)` only; request bodies cannot carry identities (unknown properties `400`); trigger verifies `actor_role` against memberships | Compromised API can name any current OWNER (E2) |
+| Cross-tenant references (I, E) | Authorization on the scan's organization before any read (`404`); requests reachable only through their scan; composite keys bind organization, project, scan, evaluation, policy and evidence; foreign members `NOT_AUTHORIZED` | Superuser (E1) |
+| Forged or substituted finding (T) | The database finds the fingerprint exactly once, as a blocking finding, in the stored bytes; derived rule, category and severity; the gate re-checks all of them against a reproduced evaluation | Worker-computed fingerprints, integrity not authenticity (E6) |
+| Evidence substitution after approval (T) | Gate requires the original evaluation to be reproducible with identical evidence references; otherwise `INCOMPLETE` | Superuser rewriting evidence and records consistently (E1) |
+| Policy substitution (T) | Binding to the pinned version, its digest and engine version; historical records cannot be referenced (foreign key to `policy.evaluations` only) | — |
+| Scope expansion (E) | One finding per request; per scan; no wildcard; only `BLOCKING_FINDINGS_EXCEEDED` coverable; duplicates of a fingerprint ineligible | — |
+| Excepting incomplete evidence (E) | INCOMPLETE originals and reasons are never coverable; `INCOMPLETE_CONDITIONS_REMAIN` | — |
+| State-machine manipulation, replay (T) | PK `(request, seq)`, self-referencing FK, CHECK on transitions; terminal states final; no return to REQUESTED; one open request per finding | — |
+| Race conditions (T) | Row locks on the evaluation (requests) and request (transitions); unique keys as backstop; concurrent decisions: one wins | — |
+| TOCTOU around expiry (E) | Database time set by trigger; CHECK `occurred_at < expires_at`; status derived at read; gate in one snapshot with `validUntil` | Clock rollback (E5) |
+| Cached authorization (E) | Gate never stored; `Cache-Control: no-store`; `RISK_ACCEPTED` distinct from PASS | Consumers ignoring `validUntil` (future M5 work) |
+| History tampering (T, R) | No UPDATE/DELETE grants; `refuse_change` triggers; `recorded_by` session user | Superuser and schema owner (E1) |
+| Secret leakage (I) | Records hold identifiers, digests, codes; errors are fixed messages; logs carry ids and outcomes | Users pasting secrets into justifications (E7) |
+| Denial of service (D) | 200 requests per scan; bounded pages and text | Gate recomputation on every read; no rate limiting (E8) |

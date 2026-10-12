@@ -38,6 +38,20 @@ public enum OrganizationPermission {
 	REEVALUATE_SCANS(OrganizationRole.ADMIN),
 
 	/**
+	 * Request a security exception for a blocking finding of a scan's original FAIL
+	 * evaluation, and withdraw one's own request (ADR-0015). A request has no effect until
+	 * someone else approves it.
+	 */
+	REQUEST_EXCEPTIONS(OrganizationRole.ADMIN),
+
+	/**
+	 * Approve, reject and revoke security exceptions (ADR-0015). Owner-only, and never for
+	 * one's own request: requesting and approving are separate duties held by distinct
+	 * people, enforced by the API and the database.
+	 */
+	DECIDE_EXCEPTIONS(OrganizationRole.OWNER),
+
+	/**
 	 * Put a policy version in force for a project. Owner-only: activation can weaken the
 	 * security gate, so drafting (ADMIN) and activation are separate permissions.
 	 */

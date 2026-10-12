@@ -64,6 +64,14 @@ info:
       The result is an additional, immutable, non-gating record; the scan's
       decision, pinned policy and original evaluation never change, and no
       scanner runs.
+    - Security exceptions (ADR-0015): an ADMIN or OWNER can request to accept
+      one verified blocking finding of a scan's original FAIL evaluation until
+      an expiry (at most 90 days); it applies only after a different OWNER
+      approves it. Exceptions never change the scan's decision, evidence or
+      evaluations and never cover INCOMPLETE conditions. The effective gate
+      (`GET /api/v1/scans/{scanId}/gate`) is computed on request and reports
+      `RISK_ACCEPTED`, never `PASS`, when it is open only because of accepted
+      risk.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development (loopback only, `local` profile)
@@ -76,6 +84,7 @@ tags:
   - name: Projects
   - name: Scans
   - name: Policies
+  - name: Security exceptions
 
 paths:
   /api/v1/organizations:
@@ -881,6 +890,366 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/scans/{scanId}/exceptions:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+    post:
+      tags: [Security exceptions]
+      operationId: requestSecurityException
+      summary: Request a security exception for one blocking finding (OWNER, ADMIN)
+      description: |
+        Asks to accept one blocking finding of the scan's **original FAIL**
+        evaluation until `expiresAt` (ADR-0015). The body names only the scanner
+        and the finding fingerprint; the server re-runs the original evaluation
+        over the current evidence of record, and the database independently
+        verifies that the fingerprint occurs exactly once, as a blocking finding
+        of a scanner with a violation, in the stored `findings.json` bytes. The
+        evaluation, policy version, engine version, job, evidence digests, rule,
+        category and severity are derived from stored records. Requester
+        identity is the caller's server-side identity.
+
+        A request has **no effect** until an OWNER other than the requester
+        approves it. The scan's decision, evidence, original evaluation and
+        historical re-evaluations never change, no scanner runs and nothing is
+        published. INCOMPLETE conditions (missing, invalid or purged evidence,
+        scanner failures, incomplete coverage, stale databases) can never be
+        excepted. At most one open request or active exception per finding;
+        at most 200 requests per scan.
+
+        `409` codes: `scan-not-exceptionable` (not COMPLETED, or the original
+        decision is not FAIL), `evaluation-not-reproducible` (the evidence of
+        record changed or was purged), `finding-not-exceptionable`,
+        `exception-request-exists`, `exception-limit-reached`. `400` for
+        `expiresAt` outside 1 hour 1 minute to 90 days (database clock).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/security-exception-request.schema.json'
+            example:
+              scanner: GITLEAKS
+              findingFingerprint: 345e9fee064d9ba9ca2f40cb623321cf59639c02b1ca0c2fb51108b086c1212b
+              justification: Synthetic test credential in a fixture; revoked at the provider. Tracked in SEC-123.
+              expiresAt: '2026-10-25T12:00:00Z'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: The request was recorded in state REQUESTED.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/security-exception.schema.json'
+              example:
+                id: 7c1e3a5b-9d2f-4e6a-8b0c-1d3f5a7b9c2e
+                scanId: 9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d
+                projectId: 6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f
+                evaluationId: 1b3d5f7a-9c2e-4a6b-8d0f-2a4c6e8b0d1f
+                policyVersionId: 8e0a2c4e-6f1b-4d3a-8c5e-0b2d4f6a8c1e
+                policySha256: 3b5d7f9a1c2e4f6a8b0c2d4e6f8a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a
+                engineVersion: sentinelpipe-policy/1.0.0
+                scannerType: GITLEAKS
+                jobId: 3c5e7a9b-0d1f-4e2a-9b3c-5d7e9f1a3b5c
+                leaseEpoch: 1
+                artifactSha256: 2f1b8519c42b5085a2e3e6a4a70417fc2f1b8519c42b5085a2e3e6a4a70417fc
+                resultSha256: 9f2b5c0d1e4a7b8c3d6e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c
+                finding:
+                  fingerprint: 345e9fee064d9ba9ca2f40cb623321cf59639c02b1ca0c2fb51108b086c1212b
+                  ruleId: github-pat
+                  category: SECRET
+                  scannerSeverity: null
+                justification: Synthetic test credential in a fixture; revoked at the provider. Tracked in SEC-123.
+                requestedBy: user:4a6c8e0b-2d4f-4b6a-8c0e-2f4a6c8e0b2d
+                requestedAt: '2026-10-11T15:20:00.5Z'
+                expiresAt: '2026-10-25T12:00:00Z'
+                state: REQUESTED
+                status: REQUESTED
+                statusAsOf: '2026-10-11T15:20:00.5Z'
+                transitions:
+                  - sequence: 0
+                    fromState: null
+                    toState: REQUESTED
+                    actor: user:4a6c8e0b-2d4f-4b6a-8c0e-2f4a6c8e0b2d
+                    actorRole: ADMIN
+                    rationale: null
+                    occurredAt: '2026-10-11T15:20:00.5Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    get:
+      tags: [Security exceptions]
+      operationId: listSecurityExceptions
+      summary: List a scan's security exception requests
+      description: |
+        Oldest first. Each request carries its immutable transition history and
+        its `status` at the database clock (`ACTIVE` only for an unexpired
+        approval).
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: A page of security exception requests.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/security-exception-page.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/scans/{scanId}/exceptions/{exceptionId}:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+      - $ref: '#/components/parameters/ExceptionId'
+    get:
+      tags: [Security exceptions]
+      operationId: getSecurityException
+      summary: Get a security exception request and its transition history
+      description: A request of another scan is reported as not found.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The request with its transitions.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/security-exception.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/scans/{scanId}/exceptions/{exceptionId}/approve:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+      - $ref: '#/components/parameters/ExceptionId'
+    post:
+      tags: [Security exceptions]
+      operationId: approveSecurityException
+      summary: Approve another person's exception request (OWNER, never the requester)
+      description: |
+        REQUESTED -> APPROVED. The approver must be a current OWNER and must not be
+        the requester (`403 self-decision-forbidden`, also enforced by the
+        database). The original evaluation must still be reproducible and the
+        finding still verifiable. Approval needs at least 5 minutes of validity
+        left. Concurrent decisions on one request produce exactly one
+        transition; the others receive `409 invalid-exception-transition`.
+
+        `409` codes: `invalid-exception-transition`, `exception-expired`,
+        `exception-expires-too-soon`, `evaluation-not-reproducible`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/security-exception-decision.schema.json'
+            example:
+              rationale: Verified the credential is synthetic and revoked; remediation tracked in SEC-123.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The request, now APPROVED (status ACTIVE until it expires or is revoked).
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/security-exception.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/scans/{scanId}/exceptions/{exceptionId}/reject:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+      - $ref: '#/components/parameters/ExceptionId'
+    post:
+      tags: [Security exceptions]
+      operationId: rejectSecurityException
+      summary: Reject another person's exception request (OWNER, never the requester)
+      description: |
+        REQUESTED -> REJECTED (terminal; a rejected request is never approved
+        later). `409` codes: `invalid-exception-transition`, `exception-expired`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/security-exception-decision.schema.json'
+            example:
+              rationale: The secret must be removed from the repository instead.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The request, now REJECTED.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/security-exception.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/scans/{scanId}/exceptions/{exceptionId}/withdraw:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+      - $ref: '#/components/parameters/ExceptionId'
+    post:
+      tags: [Security exceptions]
+      operationId: withdrawSecurityException
+      summary: Withdraw one's own pending exception request (the requester, OWNER or ADMIN)
+      description: |
+        REQUESTED -> WITHDRAWN (terminal). Only the requester may withdraw
+        (`403 not-requester`). `409` codes: `invalid-exception-transition`,
+        `exception-expired`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/security-exception-decision.schema.json'
+            example:
+              rationale: The finding was fixed in the next commit.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The request, now WITHDRAWN.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/security-exception.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/scans/{scanId}/exceptions/{exceptionId}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+      - $ref: '#/components/parameters/ExceptionId'
+    post:
+      tags: [Security exceptions]
+      operationId: revokeSecurityException
+      summary: Revoke an approved exception (OWNER)
+      description: |
+        APPROVED -> REVOKED (terminal). The exception stops applying immediately:
+        the effective gate is computed on every request. An expired exception
+        cannot be revoked (`409 exception-expired`); it already does not apply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/security-exception-decision.schema.json'
+            example:
+              rationale: The credential was found to be live; acceptance withdrawn.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The exception, now REVOKED.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/security-exception.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/scans/{scanId}/gate:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+    get:
+      tags: [Security exceptions]
+      operationId: getEffectiveGate
+      summary: Compute the scan's effective security gate now
+      description: |
+        The original decision with active security exceptions applied, computed
+        on every request in one database snapshot and never stored
+        (`Cache-Control: no-store`). `effectiveDecision` is `RISK_ACCEPTED`, never
+        `PASS`, when an original FAIL is open only because of accepted risk;
+        consumers must treat it as distinct from PASS and must not rely on it
+        after `validUntil`. INCOMPLETE is never turned into PASS or
+        RISK_ACCEPTED. No integration (GitHub Checks, branch protection,
+        deployment) consumes this result yet.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The effective gate at `evaluatedAt`.
+          headers:
+            Cache-Control:
+              description: Always `no-store`.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/effective-gate.schema.json'
+              example:
+                scanId: 9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d
+                executionStatus: COMPLETED
+                originalDecision: FAIL
+                evaluationId: 1b3d5f7a-9c2e-4a6b-8d0f-2a4c6e8b0d1f
+                effectiveDecision: RISK_ACCEPTED
+                exceptionBased: true
+                reasons:
+                  - code: VIOLATION_EXCEPTED
+                    scanner: GITLEAKS
+                    observed: 1
+                    limit: 0
+                appliedExceptions:
+                  - id: 7c1e3a5b-9d2f-4e6a-8b0c-1d3f5a7b9c2e
+                    scannerType: GITLEAKS
+                    findingFingerprint: 345e9fee064d9ba9ca2f40cb623321cf59639c02b1ca0c2fb51108b086c1212b
+                    expiresAt: '2026-10-25T12:00:00Z'
+                evaluatedAt: '2026-10-12T09:00:00.125Z'
+                validUntil: '2026-10-25T12:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/me:
     get:
       tags: [Identity]
@@ -1074,6 +1443,13 @@ components:
         format: uuid
     ScanId:
       name: scanId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ExceptionId:
+      name: exceptionId
       in: path
       required: true
       schema:

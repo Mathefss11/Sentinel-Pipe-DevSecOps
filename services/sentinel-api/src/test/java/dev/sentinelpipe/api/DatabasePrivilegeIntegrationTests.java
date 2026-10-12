@@ -198,7 +198,10 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 				// V010: historical re-evaluation.
 				Map.entry("policy.historical_context(uuid)", api),
 				Map.entry("policy.record_historical_evaluation(uuid,uuid,text,text,text,text,text,"
-						+ "timestamp with time zone,text,text)", api));
+						+ "timestamp with time zone,text,text)", api),
+				// V011: security exceptions.
+				Map.entry("policy.request_exception(uuid,text,text,text,timestamp with time zone,text)", api),
+				Map.entry("policy.transition_exception(uuid,text,text,text)", api));
 		for (Map.Entry<String, List<String>> function : expected.entrySet()) {
 			assertThat(this.admin.jdbc().queryForList("""
 					SELECT a.grantee::regrole::text FROM pg_proc p, aclexplode(p.proacl) a
@@ -220,7 +223,8 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 				SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a
 				WHERE p.pronamespace = 'policy'::regnamespace
 				  AND p.proname IN ('validate_reasons', 'refuse_change', 'require_initial_state', 'require_evaluation_record',
-				                    'historical_inputs_sha256')
+				                    'historical_inputs_sha256', 'member_role', 'exception_target',
+				                    'check_exception_request', 'check_exception_transition')
 				  AND a.grantee <> p.proowner
 				""", Long.class))
 			.isZero();
@@ -238,7 +242,9 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 				                'policy.project_assignments'::regclass, 'policy.scan_policies'::regclass,
 				                'policy.evaluations'::regclass, 'policy.evaluation_evidence'::regclass,
 				                'policy.historical_evaluations'::regclass,
-				                'policy.historical_evaluation_evidence'::regclass)
+				                'policy.historical_evaluation_evidence'::regclass,
+				                'policy.exception_requests'::regclass, 'policy.exception_transitions'::regclass,
+				                'policy.exception_status'::regclass)
 				  AND a.grantee <> c.relowner
 				""", String.class))
 			.containsExactly("sentinel_api:SELECT");
@@ -362,7 +368,16 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 			"UPDATE policy.historical_evaluations SET decision = 'PASS'", "DELETE FROM policy.historical_evaluations",
 			"UPDATE policy.historical_evaluation_evidence SET sha256 = sha256",
 			"DELETE FROM policy.historical_evaluation_evidence", "TRUNCATE policy.historical_evaluations",
-			"SELECT policy.historical_inputs_sha256(gen_random_uuid(), now())" })
+			"SELECT policy.historical_inputs_sha256(gen_random_uuid(), now())",
+			// V011: exception records only through policy.request_exception and
+			// policy.transition_exception; never changed.
+			"INSERT INTO policy.exception_requests (scan_id) VALUES (gen_random_uuid())",
+			"INSERT INTO policy.exception_transitions (request_id, seq, to_state, requested_by, expires_at, actor,"
+					+ " actor_role) VALUES (gen_random_uuid(), 1, 'APPROVED', 'x', now(), 'y', 'OWNER')",
+			"UPDATE policy.exception_requests SET expires_at = now()", "DELETE FROM policy.exception_requests",
+			"UPDATE policy.exception_transitions SET actor = actor", "DELETE FROM policy.exception_transitions",
+			"TRUNCATE policy.exception_transitions", "SELECT policy.member_role(gen_random_uuid(), 'x')",
+			"SELECT * FROM policy.exception_target(gen_random_uuid(), 'GITLEAKS', repeat('a', 64))" })
 	void apiRuntimeIdentityIsDenied(String sql) {
 		assertDenied(api(), sql);
 	}
@@ -418,6 +433,16 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 				+ " gen_random_uuid(), repeat('a', 64), 'sentinelpipe-policy/1.0.0', 'INCOMPLETE', '[]', '[]', now(),"
 				+ " repeat('b', 64), 'user:' || gen_random_uuid())"))
 			.containsEntry("outcome", "NOT_FOUND");
+		// V011: exception records and their status are readable; written only through functions.
+		assertThat(api.queryForObject("SELECT count(*) FROM policy.exception_requests", Long.class)).isNotNull();
+		assertThat(api.queryForObject("SELECT count(*) FROM policy.exception_transitions", Long.class)).isNotNull();
+		assertThat(api.queryForObject("SELECT count(*) FROM policy.exception_status", Long.class)).isNotNull();
+		assertThat(api.queryForMap("SELECT * FROM policy.request_exception(gen_random_uuid(), 'GITLEAKS',"
+				+ " repeat('a', 64), 'a justification of twenty', now() + interval '1 day', 'user:' || gen_random_uuid())"))
+			.containsEntry("outcome", "NOT_FOUND");
+		assertThat(api.queryForObject("SELECT policy.transition_exception(gen_random_uuid(), 'APPROVED',"
+				+ " 'user:' || gen_random_uuid(), 'ok')", String.class))
+			.isEqualTo("NOT_FOUND");
 	}
 
 	// ---------------------------------------------------------------------------------
@@ -455,7 +480,10 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 			"SELECT count(*) FROM policy.historical_evaluations",
 			"SELECT * FROM policy.historical_context(gen_random_uuid())",
 			"SELECT * FROM policy.record_historical_evaluation(gen_random_uuid(), gen_random_uuid(), repeat('a', 64),"
-					+ " 'x', 'PASS', '[]', '[]', now(), repeat('b', 64), 'x')" })
+					+ " 'x', 'PASS', '[]', '[]', now(), repeat('b', 64), 'x')",
+			"SELECT count(*) FROM policy.exception_requests", "SELECT count(*) FROM policy.exception_status",
+			"SELECT * FROM policy.request_exception(gen_random_uuid(), 'GITLEAKS', repeat('a', 64), 'x', now(), 'x')",
+			"SELECT policy.transition_exception(gen_random_uuid(), 'APPROVED', 'x', 'x')" })
 	void workerIdentityIsDenied(String sql) {
 		assertDenied(worker(), sql);
 	}
@@ -472,7 +500,9 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 					+ " '[]', '[]', now())",
 			"SELECT count(*) FROM policy.historical_evaluations",
 			"SELECT * FROM policy.record_historical_evaluation(gen_random_uuid(), gen_random_uuid(), repeat('a', 64),"
-					+ " 'x', 'PASS', '[]', '[]', now(), repeat('b', 64), 'x')" })
+					+ " 'x', 'PASS', '[]', '[]', now(), repeat('b', 64), 'x')",
+			"SELECT count(*) FROM policy.exception_transitions",
+			"SELECT policy.transition_exception(gen_random_uuid(), 'APPROVED', 'x', 'x')" })
 	void operatorIdentityIsDenied(String sql) {
 		assertDenied(operator(), sql);
 	}

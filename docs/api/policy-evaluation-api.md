@@ -1,11 +1,12 @@
-# Policy and evaluation API (M4 Phases 1 and 2)
+# Policy and evaluation API (M4 Phases 1 to 3)
 
-Eight operations under `/api/v1`, documented in
+Fifteen operations under `/api/v1`, documented in
 [`sentinel-api-v1.yaml`](../../packages/contracts/openapi/sentinel-api-v1.yaml) (tag
-`Policies`) with JSON Schemas in `packages/contracts/schemas/v1`. Design:
+`Policies` and `Security exceptions`) with JSON Schemas in `packages/contracts/schemas/v1`. Design:
 [ADR-0013](../adr/0013-security-policy-engine.md) (policies, gate evaluation) and
 [ADR-0014](../adr/0014-historical-policy-re-evaluation.md) (historical re-evaluation,
-proposed). Like the rest of the domain API, these
+accepted) and [ADR-0015](../adr/0015-security-exceptions-and-independent-approval.md)
+(security exceptions and the effective gate, proposed). Like the rest of the domain API, these
 endpoints exist only when the domain API is enabled (loopback-only, ADR-0002).
 
 ## Authorization
@@ -25,6 +26,12 @@ resource that does not exist; members without the role receive `403`
 | `POST /scans/{scanId}/reevaluations` (historical re-evaluation) | yes | yes | no | no |
 | `GET /scans/{scanId}/evaluations` (history) | yes | yes | yes | yes |
 | `GET /scans/{scanId}/evaluations/{evaluationId}` | yes | yes | yes | yes |
+| `POST /scans/{scanId}/exceptions` (request) | yes | yes | no | no |
+| `GET /scans/{scanId}/exceptions`, `.../exceptions/{exceptionId}` | yes | yes | yes | yes |
+| `POST .../exceptions/{exceptionId}/approve`, `/reject` | yes, never own | no | no | no |
+| `POST .../exceptions/{exceptionId}/withdraw` | requester | requester | no | no |
+| `POST .../exceptions/{exceptionId}/revoke` | yes | no | no | no |
+| `GET /scans/{scanId}/gate` (effective gate) | yes | yes | yes | yes |
 
 - Activation is OWNER-only because it can weaken the gate; drafting is ADMIN.
 - Historical re-evaluation is ADMIN or above (`REEVALUATE_SCANS`): it never changes a
@@ -156,3 +163,74 @@ POST /api/v1/scans/{scan}/reevaluations          (ADMIN)  → 201, HISTORICAL, g
 GET  /api/v1/scans/{scan}                                  → still COMPLETED / FAIL / POLICY_EVALUATED
 GET  /api/v1/scans/{scan}/evaluations                      → ORIGINAL (FAIL, version 1), HISTORICAL (PASS, version 2)
 ```
+
+## Security exceptions
+
+[ADR-0015](../adr/0015-security-exceptions-and-independent-approval.md) (proposed). An
+exception accepts **one** verified blocking finding of a scan's **original FAIL**
+evaluation until an expiry. It needs an OWNER other than the requester, never changes the
+scan's decision, evidence or evaluations, and never covers an INCOMPLETE condition.
+
+### Request
+
+`POST /api/v1/scans/{scanId}/exceptions` (ADMIN or OWNER), body
+`security-exception-request`:
+
+```json
+{"scanner": "GITLEAKS", "findingFingerprint": "<64 hex>",
+ "justification": "Synthetic fixture credential, revoked; tracked in SEC-123.",
+ "expiresAt": "2026-10-25T12:00:00Z"}
+```
+
+- The server re-runs the original evaluation over the current evidence of record and the
+  database verifies that the fingerprint occurs **exactly once**, as a blocking finding of a
+  scanner with a violation, in the stored `findings.json`. Evaluation, policy version and
+  digest, engine version, job, evidence digests, rule, category and severity are derived,
+  never accepted. Unknown properties (`requestedBy`, `status`, ...) are `400`.
+- `expiresAt`: 1 hour 1 minute to 90 days after the request (database clock), else `400`.
+- `201` with `security-exception` (state `REQUESTED`) and `Location`.
+- `409`: `scan-not-exceptionable`, `evaluation-not-reproducible`,
+  `finding-not-exceptionable` (deliberately not more specific), `exception-request-exists`
+  (an open request or active exception exists for the finding), `exception-limit-reached`
+  (200 per scan).
+
+### Decide
+
+`POST .../exceptions/{exceptionId}/approve | reject | withdraw | revoke`, body
+`security-exception-decision` (`{"rationale": "..."}`, 1 to 1,000 characters), returns the
+updated `security-exception`.
+
+| Action | Transition | Who |
+|---|---|---|
+| approve | REQUESTED → APPROVED | an OWNER other than the requester (`403 self-decision-forbidden`) |
+| reject | REQUESTED → REJECTED | an OWNER other than the requester |
+| withdraw | REQUESTED → WITHDRAWN | the requester (`403 not-requester`) |
+| revoke | APPROVED → REVOKED | an OWNER |
+
+`409`: `invalid-exception-transition` (not in the state the action leaves, including
+concurrent decisions: exactly one wins), `exception-expired`, `exception-expires-too-soon`
+(approval with under 5 minutes left), `evaluation-not-reproducible` (approval when the
+evidence changed or was purged).
+
+### Read
+
+`GET /api/v1/scans/{scanId}/exceptions?page=&size=` → `security-exception-page` (oldest
+first, `size` ≤ 100); `GET .../exceptions/{exceptionId}` → `security-exception`. A request of
+another scan is `404`.
+
+| Field | Meaning |
+|---|---|
+| `state` | Last recorded transition |
+| `status` | At the database clock (`statusAsOf`): `ACTIVE` only for an unexpired approval; `EXPIRED` for REQUESTED or APPROVED past `expiresAt` |
+| `transitions` | Immutable history: sequence, from, to, actor (`user:<identity id>`), verified role, rationale, database time |
+| `evaluationId`, `policyVersionId`, `policySha256`, `engineVersion`, `jobId`, `leaseEpoch`, `artifactSha256`, `resultSha256` | The binding |
+| `finding` | Fingerprint, rule id, category, scanner severity; never paths or evidence content |
+
+### Effective gate
+
+`GET /api/v1/scans/{scanId}/gate` (VIEWER and above) → `effective-gate`, computed on every
+request (`Cache-Control: no-store`), never stored. `effectiveDecision` is `PASS`, `FAIL`,
+`INCOMPLETE` or `RISK_ACCEPTED` (never PASS; `exceptionBased: true`, `validUntil`). See
+[decision semantics](../architecture/policy-decision-semantics.md#security-exceptions-and-the-effective-gate).
+No integration consumes it yet; the scan's `securityDecision` remains the original
+decision.

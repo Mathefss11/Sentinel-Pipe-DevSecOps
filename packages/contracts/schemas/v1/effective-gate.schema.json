@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/effective-gate.schema.json",
+  "title": "Effective security gate",
+  "description": "The scan's original policy decision with active security exceptions applied (ADR-0015), computed when requested and never stored or cached. `originalDecision` is the scan's recorded security decision and never changes. `effectiveDecision`: PASS only when the original decision is PASS; RISK_ACCEPTED (never PASS) when every violation of an original FAIL on complete, reproducible evidence is covered by active exceptions; FAIL when a violation remains; INCOMPLETE for everything that cannot be shown (scan not completed, no original evaluation, original INCOMPLETE, original not reproducible from the current evidence of record, or incomplete conditions remaining). Exceptions never cover INCOMPLETE conditions. A RISK_ACCEPTED result is valid only at `evaluatedAt` and must not be relied on after `validUntil`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "scanId", "executionStatus", "originalDecision", "evaluationId", "effectiveDecision", "exceptionBased", "reasons",
+    "appliedExceptions", "evaluatedAt", "validUntil"
+  ],
+  "properties": {
+    "scanId": { "$ref": "common.schema.json#/$defs/uuid" },
+    "executionStatus": { "enum": ["QUEUED", "RUNNING", "EVALUATING", "COMPLETED", "FAILED", "CANCELLED"] },
+    "originalDecision": { "enum": ["PENDING", "PASS", "FAIL", "INCOMPLETE"] },
+    "evaluationId": {
+      "description": "The original evaluation, or null when the scan has none.",
+      "oneOf": [{ "$ref": "common.schema.json#/$defs/uuid" }, { "type": "null" }]
+    },
+    "effectiveDecision": { "enum": ["PASS", "FAIL", "INCOMPLETE", "RISK_ACCEPTED"] },
+    "exceptionBased": {
+      "description": "True only for RISK_ACCEPTED: the result relies on accepted risk.",
+      "type": "boolean"
+    },
+    "reasons": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "scanner", "observed", "limit"],
+        "properties": {
+          "code": {
+            "enum": [
+              "SCAN_NOT_COMPLETED", "ORIGINAL_EVALUATION_MISSING", "ORIGINAL_INCOMPLETE", "ORIGINAL_NOT_REPRODUCIBLE",
+              "VIOLATION_NOT_EXCEPTED", "VIOLATION_EXCEPTED", "INCOMPLETE_CONDITIONS_REMAIN"
+            ]
+          },
+          "scanner": { "enum": [null, "SEMGREP", "GITLEAKS", "TRIVY", "CHECKOV", "SYFT", "ZAP", "FIXTURE"] },
+          "observed": { "type": ["integer", "null"], "minimum": 0 },
+          "limit": { "type": ["integer", "null"], "minimum": 0 }
+        }
+      }
+    },
+    "appliedExceptions": {
+      "type": "array",
+      "maxItems": 3000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "scannerType", "findingFingerprint", "expiresAt"],
+        "properties": {
+          "id": { "$ref": "common.schema.json#/$defs/uuid" },
+          "scannerType": { "enum": ["GITLEAKS", "SEMGREP", "TRIVY"] },
+          "findingFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "expiresAt": { "$ref": "common.schema.json#/$defs/timestamp" }
+        }
+      }
+    },
+    "evaluatedAt": {
+      "description": "Database time of the snapshot the result was computed from.",
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "validUntil": {
+      "description": "For RISK_ACCEPTED, the earliest expiry of the applied exceptions; otherwise null.",
+      "$ref": "common.schema.json#/$defs/nullableTimestamp"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "effectiveDecision": { "const": "RISK_ACCEPTED" } } },
+      "then": {
+        "properties": {
+          "exceptionBased": { "const": true },
+          "originalDecision": { "const": "FAIL" },
+          "appliedExceptions": { "minItems": 1 },
+          "validUntil": { "type": "string" }
+        }
+      },
+      "else": { "properties": { "exceptionBased": { "const": false }, "validUntil": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "effectiveDecision": { "const": "PASS" } } },
+      "then": {
+        "properties": {
+          "originalDecision": { "const": "PASS" },
+          "reasons": { "maxItems": 0 },
+          "appliedExceptions": { "maxItems": 0 }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/security-exception-page.schema.json",
+  "title": "SecurityExceptionPage",
+  "description": "A page of a scan's security exception requests, oldest first (request time, then id). Records are read as stored; status is derived from the database clock at read time.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "page"],
+  "properties": {
+    "items": { "type": "array", "maxItems": 100, "items": { "$ref": "security-exception.schema.json" } },
+    "page": { "$ref": "page-metadata.schema.json" }
+  }
+}

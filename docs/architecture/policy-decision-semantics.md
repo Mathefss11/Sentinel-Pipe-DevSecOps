@@ -116,3 +116,40 @@ explicitly chosen policy version. Only three inputs differ from the gate evaluat
 Re-evaluating under the pinned version on unchanged evidence reproduces the original
 decision, reasons and evidence references. A historical record is never gating: the scan's
 decision is always the `ORIGINAL` record's.
+
+## Security exceptions and the effective gate
+
+M4 Phase 3 ([ADR-0015](../adr/0015-security-exceptions-and-independent-approval.md), proposed)
+adds accepted risk **without changing anything above**. Four concepts stay separate:
+
+1. **Finding detection:** the `findings.v1` evidence of record. Never changed.
+2. **Policy violation:** the original evaluation's `BLOCKING_FINDINGS_EXCEEDED` reasons.
+   Never changed; the scan's `securityDecision` stays the original decision.
+3. **Approved exception:** an independent OWNER's approval to accept **one** verified
+   blocking finding of that evaluation until an expiry. Append-only records.
+4. **Effective gate result:** computed on request, never stored.
+
+Effective gate, in one database snapshot:
+
+| Original | Condition | Effective |
+|---|---|---|
+| (scan not COMPLETED) | | `INCOMPLETE` (`SCAN_NOT_COMPLETED`) |
+| (no original evaluation) | | `INCOMPLETE` (`ORIGINAL_EVALUATION_MISSING`) |
+| `PASS` | | `PASS` |
+| `INCOMPLETE` | | `INCOMPLETE` (`ORIGINAL_INCOMPLETE`): exceptions never cover incomplete evidence |
+| `FAIL` | original not reproducible from current evidence | `INCOMPLETE` (`ORIGINAL_NOT_REPRODUCIBLE`) |
+| `FAIL` | a scanner still exceeds its limit after removing excepted findings | `FAIL` (`VIOLATION_NOT_EXCEPTED`) |
+| `FAIL` | every violation covered, incomplete reasons remain | `INCOMPLETE` (`INCOMPLETE_CONDITIONS_REMAIN`) |
+| `FAIL` | every violation covered, no incomplete reason | `RISK_ACCEPTED` |
+
+- **Reproducible** means: the engine, run again with the pinned version as of the original
+  decision time over the evidence of record as stored now, yields the same engine version,
+  decision, canonical reasons and evidence references as the original record.
+- An exception **covers** a finding only while ACTIVE (approved, not revoked, before
+  `expiresAt` at the database clock) and only if bound to exactly this evaluation, policy,
+  engine, job, epoch and evidence digests, with a fingerprint, rule, category and severity
+  that name a blocking finding occurring exactly once. Only `BLOCKING_FINDINGS_EXCEEDED`
+  can be covered.
+- `RISK_ACCEPTED` is never `PASS`: it carries `exceptionBased: true` and `validUntil` (the
+  earliest expiry of the applied exceptions). Precedence is unchanged: an uncovered
+  violation is `FAIL` even when other evidence is incomplete.

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/security-exception-decision.schema.json",
+  "title": "Approve, reject, withdraw or revoke a security exception",
+  "description": "The rationale recorded with a transition (ADR-0015). The actor is the caller's server-side identity; actor, role, state and timestamps are never accepted (unknown properties are rejected).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rationale"],
+  "properties": {
+    "rationale": {
+      "description": "Why the decision was taken. No control characters, no leading or trailing whitespace. Never include secret values.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    }
+  }
+}

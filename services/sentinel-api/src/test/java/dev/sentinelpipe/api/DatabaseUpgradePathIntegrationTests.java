@@ -3,6 +3,13 @@ package dev.sentinelpipe.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.sentinelpipe.api.evidence.EvidenceVerifier;
+import dev.sentinelpipe.api.policy.PolicyDocuments;
+import dev.sentinelpipe.api.policy.PolicyFixtures;
+import dev.sentinelpipe.api.policy.PolicyFixtures.Findings;
+import dev.sentinelpipe.api.policy.PolicyFixtures.JobContext;
+import dev.sentinelpipe.api.policy.PolicyScanner;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -68,8 +75,8 @@ class DatabaseUpgradePathIntegrationTests {
 		MigrateResult result = migrator().migrate();
 
 		assertThat(result.success).isTrue();
-		// V006 to V010.
-		assertThat(result.migrationsExecuted).isEqualTo(5);
+		// V006 to V011.
+		assertThat(result.migrationsExecuted).isEqualTo(6);
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
 				+ " WHERE n.nspname IN ('public', 'worker', 'ops', 'lifecycle', 'evidence', 'policy')"
 				+ " AND c.relowner <> 'sentinel_owner'::regrole",
@@ -163,8 +170,8 @@ class DatabaseUpgradePathIntegrationTests {
 				reported.get("job_id"), scanId, reported.get("lease_epoch"), reported.get("lease_token")))
 			.isEqualTo("ACCEPTED");
 
-		// V008, V009 and V010.
-		assertThat(migrator().migrate().migrationsExecuted).isEqualTo(3);
+		// V008 to V011.
+		assertThat(migrator().migrate().migrationsExecuted).isEqualTo(4);
 
 		// The legacy report is kept as it was; report_job no longer exists.
 		assertThat(jdbc.queryForMap("SELECT outcome, result FROM lifecycle.job_reports WHERE job_id = ?",
@@ -187,6 +194,105 @@ class DatabaseUpgradePathIntegrationTests {
 			.isEqualTo("ACCEPTED");
 		assertThat(jdbc.queryForObject("SELECT execution_status FROM scans WHERE id = ?", String.class, scanId))
 			.isEqualTo("EVALUATING");
+	}
+
+	@Test
+	void v011BindsExceptionsToRecordsWrittenUnderV009AndV010() {
+		// A V010 installation with a policy-pinned scan, its V009 original FAIL evaluation
+		// and a V010 historical re-evaluation, all written through their functions.
+		DatabaseRoles.provision(this.postgres);
+		flyway(DatabaseRoles.MIGRATOR_USER, DatabaseRoles.MIGRATOR_PASSWORD, "10", "SET ROLE sentinel_owner")
+			.migrate();
+		JdbcTemplate jdbc = this.admin.jdbc();
+		UUID organizationId = UUID.randomUUID();
+		UUID projectId = UUID.randomUUID();
+		UUID scanId = UUID.randomUUID();
+		UUID owner = UUID.randomUUID();
+		UUID administrator = UUID.randomUUID();
+		jdbc.update("INSERT INTO organizations (id, name, slug, version, created_at, updated_at)"
+				+ " VALUES (?, 'V10', 'v10', 0, now(), now())", organizationId);
+		jdbc.update("INSERT INTO projects (id, organization_id, name, repository_provider, repository_owner,"
+				+ " repository_name, default_branch, enabled, version, created_at, updated_at)"
+				+ " VALUES (?, ?, 'P', 'GITHUB', 'acme', 'repo', 'main', true, 0, now(), now())", projectId,
+				organizationId);
+		for (Map.Entry<UUID, String> member : Map.of(owner, "OWNER", administrator, "ADMIN").entrySet()) {
+			jdbc.update("INSERT INTO user_identities (id, issuer, subject, version, created_at, updated_at)"
+					+ " VALUES (?, 'https://idp.example', ?, 0, now(), now())", member.getKey(), member.getValue());
+			jdbc.update("INSERT INTO organization_memberships (id, organization_id, user_identity_id, role, granted_by,"
+					+ " version, created_at, updated_at) VALUES (gen_random_uuid(), ?, ?, ?, NULL, 0, now(), now())",
+					organizationId, member.getKey(), member.getValue());
+		}
+		String definition = PolicyDocuments.parse(PolicyFixtures.gitleaksOnly("secrets")).canonical();
+		UUID versionId = jdbc.queryForObject(
+				"SELECT policy_version_id FROM policy.create_policy_version(?, 'secrets', ?, ?)", UUID.class,
+				organizationId, definition, "user:" + owner);
+		jdbc.queryForObject("SELECT policy.assign_project_policy(?, ?, ?)", String.class, projectId, versionId,
+				"user:" + owner);
+		jdbc.update("INSERT INTO scans (id, project_id, commit_sha, branch, trigger_type, execution_status,"
+				+ " security_decision, version, requested_at, updated_at)"
+				+ " VALUES (?, ?, repeat('a', 40), 'main', 'PUSH', 'QUEUED', 'PENDING', 0, now(), now())", scanId,
+				projectId);
+		assertThat(jdbc.queryForObject("SELECT policy.pin_scan_policy(?)", UUID.class, scanId)).isEqualTo(versionId);
+		jdbc.update("INSERT INTO scan_jobs (id, scan_id, scanner_type, execution_status, attempt_count, version,"
+				+ " created_at, updated_at) VALUES (gen_random_uuid(), ?, 'GITLEAKS', 'QUEUED', 0, 0, now(), now())",
+				scanId);
+		WorkerProtocol worker = new WorkerProtocol(
+				this.admin.connectAs(DatabaseRoles.WORKER_USER, DatabaseRoles.WORKER_PASSWORD));
+		WorkerProtocol.Lease lease = worker.claim(scanId, "GITLEAKS").orElseThrow();
+		byte[] evidence = new Findings(PolicyScanner.GITLEAKS,
+				new JobContext(organizationId, projectId, scanId, lease.jobId(), lease.commitSha()))
+			.finding("x")
+			.bytes();
+		assertThat(worker.completeWithEvidence(lease, "findings.json", evidence)).isEqualTo("ACCEPTED");
+		String references = jdbc.queryForObject("""
+				SELECT json_agg(json_build_object('job_id', u.job_id, 'lease_epoch', u.lease_epoch, 'name', u.name,
+				    'result_sha256', r.result_sha256, 'scanner_type', 'GITLEAKS', 'sha256', u.sha256))::text
+				FROM evidence.job_artifacts u JOIN lifecycle.job_reports r
+				  ON r.job_id = u.job_id AND r.lease_epoch = u.lease_epoch WHERE u.job_id = ?""", String.class,
+				lease.jobId());
+		String sha = jdbc.queryForObject("SELECT definition_sha256 FROM policy.policy_versions WHERE id = ?",
+				String.class, versionId);
+		String violation = "[{\"code\":\"BLOCKING_FINDINGS_EXCEEDED\",\"effect\":\"VIOLATION\",\"limit\":0,"
+				+ "\"observed\":1,\"scanner\":\"GITLEAKS\",\"subject\":null}]";
+		assertThat(jdbc.queryForObject("SELECT policy.record_evaluation(?, ?, ?, 'sentinelpipe-policy/1.0.0', 'FAIL',"
+				+ " ?, ?, now())", String.class, scanId, versionId, sha, violation, references))
+			.isEqualTo("COMPLETED");
+		Map<String, Object> context = jdbc.queryForMap("SELECT * FROM policy.historical_context(?)", scanId);
+		assertThat(jdbc.queryForMap("SELECT * FROM policy.record_historical_evaluation(?, ?, ?,"
+				+ " 'sentinelpipe-policy/1.0.0', 'FAIL', ?, ?, ?, ?, ?)", scanId, versionId, sha, violation, references,
+				context.get("evaluated_as_of"), context.get("inputs_sha256"), "user:" + administrator))
+			.containsEntry("outcome", "RECORDED");
+		String records = """
+				SELECT 'e' AS kind, id, decision, reasons_sha256 FROM policy.evaluations
+				UNION ALL SELECT 'h', id, decision, reasons_sha256 FROM policy.historical_evaluations ORDER BY 1, 2""";
+		List<Map<String, Object>> before = jdbc.queryForList(records);
+
+		MigrateResult result = migrator().migrate();
+
+		assertThat(result.migrationsExecuted).isEqualTo(1);
+		assertThat(migrator().validateWithResult().validationSuccessful).isTrue();
+		// An exception binds to the V009 original evaluation and its evidence, never to the
+		// V010 historical record, and needs an independent OWNER.
+		String fingerprint = EvidenceVerifier.sha256((lease.jobId() + "/0").getBytes(StandardCharsets.UTF_8));
+		Map<String, Object> created = jdbc.queryForMap("SELECT * FROM policy.request_exception(?, 'GITLEAKS', ?,"
+				+ " 'Synthetic legacy finding accepted for the upgrade test.', now() + interval '1 day', ?)", scanId,
+				fingerprint, "user:" + administrator);
+		assertThat(created).containsEntry("outcome", "CREATED");
+		UUID exceptionId = (UUID) created.get("exception_id");
+		assertThat(jdbc.queryForObject("SELECT policy.transition_exception(?, 'APPROVED', ?, 'self')", String.class,
+				exceptionId, "user:" + administrator))
+			.isEqualTo("NOT_AUTHORIZED");
+		assertThat(jdbc.queryForObject("SELECT policy.transition_exception(?, 'APPROVED', ?, 'independent')",
+				String.class, exceptionId, "user:" + owner))
+			.isEqualTo("TRANSITIONED");
+		assertThat(jdbc.queryForMap("SELECT evaluation_id, status FROM policy.exception_status WHERE id = ?", exceptionId))
+			.containsEntry("evaluation_id",
+					jdbc.queryForObject("SELECT id FROM policy.evaluations WHERE scan_id = ?", UUID.class, scanId))
+			.containsEntry("status", "ACTIVE");
+		// The V009 and V010 records are unchanged.
+		assertThat(jdbc.queryForList(records)).isEqualTo(before);
+		assertThat(jdbc.queryForObject("SELECT security_decision FROM scans WHERE id = ?", String.class, scanId))
+			.isEqualTo("FAIL");
 	}
 
 	@Test
@@ -215,7 +321,7 @@ class DatabaseUpgradePathIntegrationTests {
 	void freshInstallationMigratesEntirelyAsTheOwner() {
 		DatabaseRoles.provision(this.postgres);
 
-		assertThat(migrator().migrate().migrationsExecuted).isEqualTo(10);
+		assertThat(migrator().migrate().migrationsExecuted).isEqualTo(11);
 		assertThat(this.admin.jdbc()
 			.queryForObject("SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'flyway_schema_history'::regclass",
 					String.class))

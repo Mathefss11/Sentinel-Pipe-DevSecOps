@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import dev.sentinelpipe.api.AbstractDomainApiIntegrationTest;
 import dev.sentinelpipe.api.TestJwts;
 import dev.sentinelpipe.api.policy.PolicyFixtures;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -49,7 +50,8 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 				PolicyFixtures.gitleaksOnly("covered"))).get("id").asString());
 		this.pathVariables = Map.of("organizationId", organizationId.toString(), "projectId", projectId.toString(),
 				"scanId", scanId.toString(), "membershipId", membershipId.toString(), "policyVersionId",
-				policyVersionId.toString(), "evaluationId", UUID.randomUUID().toString());
+				policyVersionId.toString(), "evaluationId", UUID.randomUUID().toString(), "exceptionId",
+				UUID.randomUUID().toString());
 		this.foreignPolicyVersionId = policyVersionId;
 	}
 
@@ -92,6 +94,14 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 		}
 		if (method.equals("POST") && path.endsWith("/reevaluations")) {
 			return "{\"policyVersionId\": \"%s\"}".formatted(this.foreignPolicyVersionId);
+		}
+		if (method.equals("POST") && path.endsWith("/exceptions")) {
+			return """
+					{"scanner": "GITLEAKS", "findingFingerprint": "%s", "justification": "an intruder justification",
+					 "expiresAt": "%s"}""".formatted("a".repeat(64), Instant.now().plusSeconds(86400));
+		}
+		if (method.equals("POST") && path.matches(".*/exceptions/[^/]+/(approve|reject|withdraw|revoke)")) {
+			return "{\"rationale\": \"intruder\"}";
 		}
 		if (method.equals("PUT") && path.endsWith("/policy")) {
 			return "{\"policyVersionId\": \"%s\"}".formatted(this.foreignPolicyVersionId);
@@ -154,6 +164,10 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 			.isZero();
 		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM policy.project_assignments WHERE project_id = ?",
 				Integer.class, UUID.fromString(this.pathVariables.get("projectId"))))
+			.isZero();
+		// No security exception was requested or decided by the outsider.
+		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM policy.exception_requests WHERE scan_id = ?",
+				Integer.class, UUID.fromString(this.pathVariables.get("scanId"))))
 			.isZero();
 		// No historical re-evaluation was recorded for the outsider.
 		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM policy.historical_evaluations WHERE scan_id = ?",

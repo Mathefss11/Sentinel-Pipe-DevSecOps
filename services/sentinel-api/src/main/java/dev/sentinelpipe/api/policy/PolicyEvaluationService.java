@@ -125,14 +125,22 @@ public class PolicyEvaluationService {
 	 * re-evaluation ({@link PolicyReevaluationService}), so both use one set of semantics.
 	 */
 	Evaluation evaluate(PolicyDefinition policy, ScanContext scan, List<JobEvidence> jobs) {
+		return assess(policy, scan, jobs).evaluation();
+	}
+
+	/**
+	 * {@link #evaluate} with the blocking findings the engine counted (security exceptions,
+	 * ADR-0015). An engine error yields EVALUATION_ERROR and no findings.
+	 */
+	PolicyEvaluator.Assessment assess(PolicyDefinition policy, ScanContext scan, List<JobEvidence> jobs) {
 		try {
-			return this.evaluator.evaluate(policy, scan, jobs);
+			return this.evaluator.assess(policy, scan, jobs);
 		}
 		catch (RuntimeException ex) {
 			// Fail closed and record why; the exception never carries evidence content.
 			log.error("policy.evaluation_error scan_id={} error_type={}", scan.scanId(),
 					ex.getClass().getSimpleName());
-			return incomplete(ReasonCode.EVALUATION_ERROR);
+			return new PolicyEvaluator.Assessment(incomplete(ReasonCode.EVALUATION_ERROR), Map.of());
 		}
 	}
 

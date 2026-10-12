@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
@@ -103,8 +104,37 @@ public final class PolicyEvaluator {
 
 	}
 
+	/**
+	 * A finding the policy counted as blocking, identified as in its verified evidence. Only
+	 * documents that passed gates 1 to 5 contribute; values are codes and digests only.
+	 * @param scannerSeverity the scanner's own label, {@code null} for Gitleaks
+	 */
+	public record BlockingFinding(String fingerprint, String ruleId, String category, String scannerSeverity) {
+	}
+
+	/**
+	 * An evaluation together with the blocking findings it counted, per scanner. The
+	 * findings do not influence the decision beyond {@link Evaluation}; they let security
+	 * exceptions (ADR-0015) name exactly which counted findings a violation consists of.
+	 */
+	public record Assessment(Evaluation evaluation, Map<ScannerType, List<BlockingFinding>> blockingFindings) {
+
+		public Assessment {
+			Map<ScannerType, List<BlockingFinding>> copy = new EnumMap<>(ScannerType.class);
+			blockingFindings.forEach((scanner, findings) -> copy.put(scanner, List.copyOf(findings)));
+			blockingFindings = Collections.unmodifiableMap(copy);
+		}
+
+	}
+
 	public Evaluation evaluate(PolicyDefinition policy, ScanContext scan, List<JobEvidence> jobs) {
+		return assess(policy, scan, jobs).evaluation();
+	}
+
+	/** {@link #evaluate}, also returning the blocking findings each scanner's count consists of. */
+	public Assessment assess(PolicyDefinition policy, ScanContext scan, List<JobEvidence> jobs) {
 		List<Reason> reasons = new ArrayList<>();
+		Map<ScannerType, List<BlockingFinding>> blocking = new EnumMap<>(ScannerType.class);
 		List<EvidenceReference> evidence = new ArrayList<>();
 		Map<ScannerType, JobEvidence> byScanner = new EnumMap<>(ScannerType.class);
 		jobs.forEach((job) -> byScanner.put(job.scannerType(), job));
@@ -115,16 +145,16 @@ public final class PolicyEvaluator {
 		}
 		jobs.stream()
 			.sorted(Comparator.comparing(JobEvidence::scannerType))
-			.forEach((job) -> evaluateJob(policy, scan, job, reasons, evidence));
+			.forEach((job) -> evaluateJob(policy, scan, job, reasons, evidence, blocking));
 		TreeSet<Reason> distinct = new TreeSet<>(Reason.ORDER);
 		distinct.addAll(reasons);
 		List<Reason> sorted = new ArrayList<>(distinct);
 		evidence.sort(Comparator.comparing(EvidenceReference::scannerType));
-		return new Evaluation(PolicyDecision.of(sorted), sorted, evidence);
+		return new Assessment(new Evaluation(PolicyDecision.of(sorted), sorted, evidence), blocking);
 	}
 
 	private void evaluateJob(PolicyDefinition policy, ScanContext scan, JobEvidence job, List<Reason> reasons,
-			List<EvidenceReference> evidence) {
+			List<EvidenceReference> evidence, Map<ScannerType, List<BlockingFinding>> blockingFindings) {
 		ScannerType type = job.scannerType();
 		Optional<PolicyScanner> governed = PolicyScanner.of(type).filter(policy.scanners()::containsKey);
 		if (governed.isEmpty()) {
@@ -252,10 +282,12 @@ public final class PolicyEvaluator {
 		}
 		long blocking = 0;
 		long unsupported = 0;
+		List<BlockingFinding> counted = new ArrayList<>();
 		for (JsonNode finding : document.get("findings").values()) {
 			if (scanner.severities().isEmpty()) {
 				// Gitleaks has no severity: every detected secret is blocking.
 				blocking++;
+				counted.add(blockingFinding(finding, null));
 				continue;
 			}
 			JsonNode label = finding.get("scanner_severity");
@@ -265,8 +297,10 @@ public final class PolicyEvaluator {
 			}
 			else if (rules.blocks(severity)) {
 				blocking++;
+				counted.add(blockingFinding(finding, severity));
 			}
 		}
+		blockingFindings.put(type, counted);
 		if (unsupported > 0) {
 			reasons.add(Reason.measured(ReasonCode.UNSUPPORTED_SCANNER_SEVERITY, type, unsupported, null));
 		}
@@ -440,6 +474,11 @@ public final class PolicyEvaluator {
 			reasons.add(Reason.measured(ReasonCode.VULNERABILITY_DATABASE_TOO_OLD, ScannerType.TRIVY, age,
 					rules.maxDatabaseAgeSeconds()));
 		}
+	}
+
+	private static BlockingFinding blockingFinding(JsonNode finding, String severity) {
+		return new BlockingFinding(text(finding, "fingerprint"), text(finding, "rule_id"), text(finding, "category"),
+				severity);
 	}
 
 	private static long secondsBetween(Instant from, Instant to) {

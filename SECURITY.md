@@ -197,6 +197,9 @@ The current version implements the following controls:
   synthetic repositories only. Policy decisions (ADR-0013) trust the database owner and the
   control-plane process; evidence integrity is verified, evidence authenticity is not.
   Historical re-evaluations (ADR-0014) are non-gating records with the same trust
-  limits; a historical PASS is never an approval.
+  limits; a historical PASS is never an approval. Security exceptions (ADR-0015) need an
+  OWNER other than the requester, but a compromised API process or a database superuser
+  can forge an approval by any current OWNER; the effective gate is not consumed by any
+  integration yet, and `RISK_ACCEPTED` is never `PASS`.
 - Image digests and action SHAs are pinned but not yet updated automatically. Dependency
   update automation and provenance verification are planned for later milestones.
