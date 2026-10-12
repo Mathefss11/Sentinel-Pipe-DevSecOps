@@ -180,7 +180,8 @@ Worker (`sentinel-worker execute`):
 - Proof that evidence came from an honest scanner run (attestation, provenance) and an
   S3-compatible evidence backend for large artifacts. See ADR-0008, "Guarantees and their
   limits".
-- Re-evaluation, security exceptions and remediation reports (later M4 slices). Policy
-  evaluation itself exists since M4 Phase 1 (ADR-0013).
+- Security exceptions and remediation reports (later M4 slices). Policy
+  evaluation exists since M4 Phase 1 (ADR-0013), non-gating historical re-evaluation since
+  M4 Phase 2 (ADR-0014, proposed).
 - Per-attempt execution time limits inside the sandbox. The scan-level hard deadline is
   enforced.

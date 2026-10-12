@@ -31,6 +31,13 @@ public enum OrganizationPermission {
 	MANAGE_POLICIES(OrganizationRole.ADMIN),
 
 	/**
+	 * Re-evaluate a completed scan's evidence of record under an explicit policy version
+	 * (ADR-0014). The result is an additional, non-gating record: it never changes a scan's
+	 * decision, so it does not require ACTIVATE_POLICY.
+	 */
+	REEVALUATE_SCANS(OrganizationRole.ADMIN),
+
+	/**
 	 * Put a policy version in force for a project. Owner-only: activation can weaken the
 	 * security gate, so drafting (ADMIN) and activation are separate permissions.
 	 */

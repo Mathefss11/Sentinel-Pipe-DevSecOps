@@ -96,3 +96,23 @@ Each reason is `{code, effect, scanner, subject, observed, limit}` with codes, s
 types, counts and seconds only. No finding content, path, rule message, package name or
 digest of raw material appears in reasons. Reasons are sorted by scanner, code, subject,
 observed and limit, and stored as canonical JSON with a digest.
+
+## Historical re-evaluation
+
+M4 Phase 2 ([ADR-0014](../adr/0014-historical-policy-re-evaluation.md)) applies exactly
+these semantics, with the same engine, to a completed scan's persisted evidence under an
+explicitly chosen policy version. Only three inputs differ from the gate evaluation:
+
+- **Policy:** the requested version of the scan's organization instead of the pinned one.
+- **Clock:** the as-of instant is the original decision time (the original evaluation's
+  `evaluated_as_of`, or the scan's `completed_at` when it had no policy), never the time of
+  the request. Evidence age and stale-evidence reasons are therefore those of the
+  original decision.
+- **Evidence state:** the evidence of record as stored at re-evaluation time. If it was
+  purged or altered since the original decision, the gates report it
+  (`EVIDENCE_PURGED`, `EVIDENCE_INTEGRITY_FAILED`); nothing is fabricated or reused from
+  the original record.
+
+Re-evaluating under the pinned version on unchanged evidence reproduces the original
+decision, reasons and evidence references. A historical record is never gating: the scan's
+decision is always the `ORIGINAL` record's.

@@ -1,4 +1,4 @@
-# Threat model: security policy engine (M4 Phase 1)
+# Threat model: security policy engine (M4 Phases 1 and 2)
 
 - **Scope:** policy versions, activation, scan pinning, evaluation and evaluation records
   ([ADR-0013](../adr/0013-security-policy-engine.md)); Flyway V009; the
@@ -62,9 +62,43 @@ not defended against).
   plausible clean evidence for its own job (ADR-0008, ADR-0009).
 - **R4 PASS is relative.** It reflects the limitations the policy accepts and scanners
   that are not comprehensive; local fixtures require accepting `COMMIT_NOT_VERIFIED`.
-- **R5 Single evaluation.** No re-evaluation; evidence that is stale when evaluated (for
-  example after a supervisor outage) leaves the scan INCOMPLETE; rescan.
+- **R5 Single evaluation.** One gate evaluation per scan; evidence that is stale when
+  evaluated (for example after a supervisor outage) leaves the scan INCOMPLETE; rescan.
+  Since M4 Phase 2, a non-gating historical re-evaluation can show what another policy
+  version says about the same evidence, but it never changes the gate decision.
 - **R6 Clocks.** Evidence age uses the database clock; Trivy database age also uses
   worker-reported metadata, bounded by the database clock.
 - **R7 Accepted limitations are not listed in the record.** A PASS consumer must read the
   pinned policy (its digest is in the record) to see which limitations were accepted.
+
+## M4 Phase 2: historical re-evaluation
+
+Scope: [ADR-0014](../adr/0014-historical-policy-re-evaluation.md), Flyway V010,
+`PolicyReevaluationService`, the three new endpoints. Review:
+[M4 Phase 2 security review](../security/m4-phase2-security-review.md).
+
+```text
+ ADMIN/OWNER ──HTTPS(JWT)──▶ API: authorize on the scan's organization (404 / 403)
+   │ resolve policy version within that organization (404 otherwise)
+   ▼ REPEATABLE READ snapshot: policy.historical_context (as-of, inputs fingerprint)
+   │   + policy version + policy.job_evidence
+   ▼ PolicyEvaluator (same engine) ──▶ policy.record_historical_evaluation
+       lock scan (NO KEY UPDATE), recompute fingerprint, re-check record, append
+```
+
+| ID | STRIDE | Threat | Controls | Tests | Residual |
+|---|---|---|---|---|---|
+| H-T1 | Info disclosure / spoofing | Re-evaluating another tenant's scan by UUID | Membership checked on the scan's organization before reading; 404 like nonexistent | `crossTenantScansPoliciesAndRecordsAreRejectedAsNotFound`, `EndpointProtectionCoverageTests` | — |
+| H-T2 | Spoofing | Forged policy reference (another tenant's version) | Version resolved within the scan's organization; function returns `POLICY_VERSION_NOT_FOUND`; composite FK refuses even a superuser insert | same | — |
+| H-T3 | Tampering | Policy substitution (version id with another digest) | `POLICY_MISMATCH` in the function; FK `(policy_version_id, policy_sha256)` | `historicalRecordsCannotBeChangedAndTheDatabaseRefusesForgedOnes` | — |
+| H-T4 | Tampering | Caller-supplied evidence, findings, decision or as-of | Request schema has only `policyVersionId`; unknown properties 400; as-of and fingerprint recomputed by the database (`AS_OF_MISMATCH`, `INPUTS_CHANGED`) | `scannerFindingsOrEvidenceAreNeverAcceptedFromTheCaller`, forgery test | — |
+| H-T5 | Tampering (TOCTOU) | Evidence changes (purge, edit) between reading and recording | Inputs and fingerprint read in one snapshot; fingerprint recomputed under the scan lock; one retry, then 409 | `PolicyReevaluationServiceTests`, `purgedEvidenceYieldsANewRecordAndNeverRewritesTheEarlierOne` | — |
+| H-T6 | Tampering (race) | Concurrent requests write duplicates or different answers | Scan row lock, identity unique constraint, `EXISTING`, `NONDETERMINISTIC` | `repeatedAndConcurrentIdenticalRequestsYieldExactlyOneRecord` | — |
+| H-T7 | Tampering / repudiation | Historical record overwritten or deleted; original decision rewritten | Separate append-only tables; no UPDATE/DELETE grants; immutability triggers; the gate tables and scan are never written | `anOriginalPassBecomesAHistoricalFailUnderAStricterPolicyWithoutChangingTheScan`, `DatabasePrivilegeIntegrationTests` | Superuser (H1) |
+| H-T8 | Elevation | A historical PASS used as approval (policy downgrade) | `gating: false`, `evaluationType: HISTORICAL`, version and digest in the record; scan decision unchanged; decision trigger reads only `policy.evaluations` | first test above | Consumers must use only the scan decision (H5) |
+| H-T9 | Elevation | MEMBER or VIEWER triggers re-evaluations | `REEVALUATE_SCANS` (ADMIN) | `ownersAndAdminsMayRequestViewersAndMembersMayNotAndOutsidersSeeNothing`, `AuthorizationMatrixTests` | — |
+| H-T10 | Denial of service | Unbounded history or records | 100 records per scan (database); pages ≤ 100, page ≤ 10,000 | `unfinishedScansUnknownForeignOrUnusableVersionsAndTheLimitFailExplicitly`, history test | No rate limiting (H8) |
+| H-T11 | Info disclosure | Evidence or secrets leak through history or audit fields | Codes, counts and digests only; requester as internal UUID (CHECK) | history test, E2E secret check | — |
+| H-T12 | Repudiation | Ambiguous engine version | Engine version stored and part of the identity; different results for one identity refused | forgery test (`sentinelpipe-policy/9.9.9`) | Old engines not executable (H4) |
+
+Residual risks H1 to H8 are listed in ADR-0014.

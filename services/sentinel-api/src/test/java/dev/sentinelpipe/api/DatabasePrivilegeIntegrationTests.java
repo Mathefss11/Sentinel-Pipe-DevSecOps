@@ -194,7 +194,11 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 				Map.entry("policy.pin_scan_policy(uuid)", api), Map.entry("policy.evaluation_context(uuid)", api),
 				Map.entry("policy.job_evidence(uuid)", api),
 				Map.entry("policy.record_evaluation(uuid,uuid,text,text,text,text,text,timestamp with time zone)",
-						api));
+						api),
+				// V010: historical re-evaluation.
+				Map.entry("policy.historical_context(uuid)", api),
+				Map.entry("policy.record_historical_evaluation(uuid,uuid,text,text,text,text,text,"
+						+ "timestamp with time zone,text,text)", api));
 		for (Map.Entry<String, List<String>> function : expected.entrySet()) {
 			assertThat(this.admin.jdbc().queryForList("""
 					SELECT a.grantee::regrole::text FROM pg_proc p, aclexplode(p.proacl) a
@@ -215,7 +219,8 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 		assertThat(this.admin.jdbc().queryForObject("""
 				SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a
 				WHERE p.pronamespace = 'policy'::regnamespace
-				  AND p.proname IN ('validate_reasons', 'refuse_change', 'require_initial_state', 'require_evaluation_record')
+				  AND p.proname IN ('validate_reasons', 'refuse_change', 'require_initial_state', 'require_evaluation_record',
+				                    'historical_inputs_sha256')
 				  AND a.grantee <> p.proowner
 				""", Long.class))
 			.isZero();
@@ -231,7 +236,9 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 				                'evidence.job_artifacts'::regclass, 'evidence.result_artifacts'::regclass,
 				                'policy.policies'::regclass, 'policy.policy_versions'::regclass,
 				                'policy.project_assignments'::regclass, 'policy.scan_policies'::regclass,
-				                'policy.evaluations'::regclass, 'policy.evaluation_evidence'::regclass)
+				                'policy.evaluations'::regclass, 'policy.evaluation_evidence'::regclass,
+				                'policy.historical_evaluations'::regclass,
+				                'policy.historical_evaluation_evidence'::regclass)
 				  AND a.grantee <> c.relowner
 				""", String.class))
 			.containsExactly("sentinel_api:SELECT");
@@ -348,7 +355,14 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 			"UPDATE policy.evaluations SET decision = 'PASS'", "DELETE FROM policy.evaluations",
 			"UPDATE policy.evaluation_evidence SET sha256 = sha256", "DELETE FROM policy.evaluation_evidence",
 			"TRUNCATE policy.evaluations", "SELECT * FROM policy.validate_reasons('[]')",
-			"UPDATE scans SET decision_reason = 'POLICY_EVALUATED'" })
+			"UPDATE scans SET decision_reason = 'POLICY_EVALUATED'",
+			// V010: historical records only through policy.record_historical_evaluation.
+			"INSERT INTO policy.historical_evaluations (scan_id) VALUES (gen_random_uuid())",
+			"INSERT INTO policy.historical_evaluation_evidence (evaluation_id) VALUES (gen_random_uuid())",
+			"UPDATE policy.historical_evaluations SET decision = 'PASS'", "DELETE FROM policy.historical_evaluations",
+			"UPDATE policy.historical_evaluation_evidence SET sha256 = sha256",
+			"DELETE FROM policy.historical_evaluation_evidence", "TRUNCATE policy.historical_evaluations",
+			"SELECT policy.historical_inputs_sha256(gen_random_uuid(), now())" })
 	void apiRuntimeIdentityIsDenied(String sql) {
 		assertDenied(api(), sql);
 	}
@@ -397,6 +411,13 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 		assertThat(api.queryForObject("SELECT policy.record_evaluation(gen_random_uuid(), gen_random_uuid(),"
 				+ " repeat('a', 64), 'sentinelpipe-policy/1.0.0', 'INCOMPLETE', '[]', '[]', now())", String.class))
 			.isEqualTo("NOT_FOUND");
+		// V010: historical records are readable; written only through the function.
+		assertThat(api.queryForObject("SELECT count(*) FROM policy.historical_evaluations", Long.class)).isNotNull();
+		assertThat(api.queryForList("SELECT * FROM policy.historical_context(gen_random_uuid())")).isEmpty();
+		assertThat(api.queryForMap("SELECT * FROM policy.record_historical_evaluation(gen_random_uuid(),"
+				+ " gen_random_uuid(), repeat('a', 64), 'sentinelpipe-policy/1.0.0', 'INCOMPLETE', '[]', '[]', now(),"
+				+ " repeat('b', 64), 'user:' || gen_random_uuid())"))
+			.containsEntry("outcome", "NOT_FOUND");
 	}
 
 	// ---------------------------------------------------------------------------------
@@ -430,7 +451,11 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 			"SELECT policy.record_evaluation(gen_random_uuid(), gen_random_uuid(), repeat('a', 64), 'x', 'PASS',"
 					+ " '[]', '[]', now())",
 			"SELECT policy.assign_project_policy(gen_random_uuid(), gen_random_uuid(), 'x')",
-			"SELECT * FROM policy.create_policy_version(gen_random_uuid(), 'x', '{}', 'x')" })
+			"SELECT * FROM policy.create_policy_version(gen_random_uuid(), 'x', '{}', 'x')",
+			"SELECT count(*) FROM policy.historical_evaluations",
+			"SELECT * FROM policy.historical_context(gen_random_uuid())",
+			"SELECT * FROM policy.record_historical_evaluation(gen_random_uuid(), gen_random_uuid(), repeat('a', 64),"
+					+ " 'x', 'PASS', '[]', '[]', now(), repeat('b', 64), 'x')" })
 	void workerIdentityIsDenied(String sql) {
 		assertDenied(worker(), sql);
 	}
@@ -444,7 +469,10 @@ class DatabasePrivilegeIntegrationTests extends AbstractIntegrationTest {
 			"SELECT * FROM evidence.list_result_artifacts(gen_random_uuid())",
 			"SELECT count(*) FROM policy.evaluations",
 			"SELECT policy.record_evaluation(gen_random_uuid(), gen_random_uuid(), repeat('a', 64), 'x', 'PASS',"
-					+ " '[]', '[]', now())" })
+					+ " '[]', '[]', now())",
+			"SELECT count(*) FROM policy.historical_evaluations",
+			"SELECT * FROM policy.record_historical_evaluation(gen_random_uuid(), gen_random_uuid(), repeat('a', 64),"
+					+ " 'x', 'PASS', '[]', '[]', now(), repeat('b', 64), 'x')" })
 	void operatorIdentityIsDenied(String sql) {
 		assertDenied(operator(), sql);
 	}

@@ -17,7 +17,7 @@ verifiable behavior, and honest reporting of coverage and limitations.
 > roles. Workers execute jobs under fenced, database-enforced leases with heartbeats,
 > bounded retries, a hard deadline and cancellation. **Real scanners (Gitleaks, Semgrep,
 > Trivy) run on local synthetic repositories only**, policy evaluation exists as a first
-> slice (M4 Phase 1), and GitHub integration is not implemented. The domain API is still
+> slice (M4 Phase 1) with non-gating historical re-evaluation (M4 Phase 2), and GitHub integration is not implemented. The domain API is still
 > restricted to loopback, development-stage use (see
 > [Security limitations](#current-security-limitations)).
 
@@ -709,7 +709,8 @@ risks and production restrictions are preserved in each ADR.
 
 ## Milestone 4, Phase 1 progress
 
-- [x] Security policy engine, first vertical slice (V009, ADR-0013, proposed):
+- [x] Security policy engine, first vertical slice (V009, ADR-0013, accepted 2026-10-11
+  after remote CI #14):
   - declarative, closed [policy.v1](docs/api/policy-contract-v1.md) with canonical
     digests; immutable versions; OWNER-only activation; scans pinned at request time;
   - deterministic evaluator over the evidence of record (integrity, binding, validity,
@@ -719,7 +720,21 @@ risks and production restrictions are preserved in each ADR.
   - [API](docs/api/policy-evaluation-api.md), [threat model](docs/threat-model/policy-engine.md),
     [runbook](docs/runbooks/policy-engine.md) and
     [security review](docs/security/m4-phase1-security-review.md).
-- [ ] Re-evaluation, security exceptions, finding comparison, remediation reports
+
+## Milestone 4, Phase 2 progress
+
+- [x] Historical policy re-evaluation (V010, [ADR-0014](docs/adr/0014-historical-policy-re-evaluation.md), proposed):
+  - a completed scan's persisted evidence of record re-evaluated under an explicit policy
+    version of its organization, with the same engine and precedence, as of the original
+    decision time; ADMIN or OWNER;
+  - immutable, non-gating records in separate append-only tables; the scan's decision,
+    pin and original evaluation never change; no scanner runs;
+  - identity (scan, version, engine version, database-computed evidence fingerprint):
+    repeats return the existing record, changed evidence yields a new one; at most 100
+    per scan;
+  - paginated evaluation history; [API](docs/api/policy-evaluation-api.md#historical-re-evaluation),
+    [security review](docs/security/m4-phase2-security-review.md).
+- [ ] Security exceptions, finding comparison, remediation reports
 
 ## Architecture decisions
 
@@ -742,6 +757,7 @@ risks and production restrictions are preserved in each ADR.
 - [ADR-0013: Security policy engine](docs/adr/0013-security-policy-engine.md)
   ([threat model](docs/threat-model/policy-engine.md), [policy contract](docs/api/policy-contract-v1.md),
   [decision semantics](docs/architecture/policy-decision-semantics.md))
+- [ADR-0014: Historical policy re-evaluation](docs/adr/0014-historical-policy-re-evaluation.md) (proposed)
 
 ## Current security limitations
 
@@ -819,7 +835,7 @@ risks and production restrictions are preserved in each ADR.
 | M1 — Foundation | Complete |
 | **M2 — Domain & Contracts** | Phases 1, 2A, 2B and 2C complete (see checklists) |
 | **M3 — Scanners** | Phase 1 complete (privilege separation, leases, result integrity, sandbox); Phase 2 in progress: Gitleaks, Semgrep and Trivy done |
-| **M4 — Security Gate & Remediation** | Phase 1 done: policy engine, coverage and freshness rules, decisions (ADR-0013: an in-process engine instead of OPA, direction approved by the owner; ADR Proposed until the final review and remote CI); exceptions, re-evaluation and remediation reports to follow |
+| **M4 — Security Gate & Remediation** | Phase 1 done: policy engine, coverage and freshness rules, decisions (ADR-0013 accepted: an in-process engine instead of OPA). Phase 2 implemented: non-gating historical re-evaluation (ADR-0014, proposed). Exceptions, finding comparison and remediation reports to follow |
 | M5 — GitHub Integration | GitHub App, webhooks, OIDC, Checks, SARIF, PR comments, artifacts |
 | M6 — Advanced Security | Checkov, Syft/SBOM, ZAP, attestation, isolated staging |
 | M7 — Hardening & Observability | Audit, timeouts, retries/DLQ, monitoring, adversarial tests |

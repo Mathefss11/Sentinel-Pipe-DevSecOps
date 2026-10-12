@@ -2,7 +2,7 @@ openapi: 3.1.0
 jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
 info:
   title: SentinelPipe Control Plane API
-  version: 1.3.0-m4.1
+  version: 1.4.0-m4.2
   summary: Organizations, memberships, projects and security scan requests.
   description: |
     Domain REST API of the SentinelPipe control plane (Milestone 2, Phase 2A).
@@ -30,6 +30,7 @@ info:
     | View policy versions, active policy, evaluations | yes | yes | yes | yes |
     | Create policy version | yes | yes | no | no |
     | Activate policy version for a project | yes | no | no | no |
+    | Request historical re-evaluation of a scan | yes | yes | no | no |
     | List members | yes | yes | no | no |
     | Grant / change / revoke OWNER, ADMIN | yes | no | no | no |
     | Grant / change / revoke MEMBER, VIEWER | yes | yes | no | no |
@@ -58,6 +59,11 @@ info:
       requirements were met, including the limitations it explicitly accepts;
       it is not a statement that the project is secure. Precedence: any
       violation is `FAIL`, otherwise any incomplete reason is `INCOMPLETE`.
+    - Historical re-evaluation (ADR-0014): a completed scan's persisted evidence
+      of record can be re-evaluated under an explicitly chosen policy version.
+      The result is an additional, immutable, non-gating record; the scan's
+      decision, pinned policy and original evaluation never change, and no
+      scanner runs.
 servers:
   - url: http://127.0.0.1:8080
     description: Local development (loopback only, `local` profile)
@@ -713,6 +719,168 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/scans/{scanId}/reevaluations:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+    post:
+      tags: [Policies]
+      operationId: reevaluateScan
+      summary: Re-evaluate a completed scan under an explicit policy version (OWNER, ADMIN)
+      description: |
+        Evaluates the scan's persisted evidence of record with the same engine and
+        decision semantics as the original evaluation (FAIL > INCOMPLETE > PASS),
+        under the requested policy version, as of the original decision time. Any
+        stored version of the scan's organization is eligible, whether or not it
+        was ever active. The result is a new, immutable, **non-gating** record
+        (`evaluationType: HISTORICAL`, `gating: false`): the scan's decision,
+        pinned policy, jobs and original evaluation never change, no scanner runs
+        and no message is published. The body names only the policy version;
+        evidence or findings are never accepted from the caller.
+
+        Idempotent: the record's identity is the scan, the policy version, the
+        engine version and a fingerprint of the evidence of record. Repeating a
+        request returns the existing record (`200`, `Idempotent-Replayed: true`);
+        if the evidence changed (for example, content purged by retention), a new
+        record is written. At most 100 historical records per scan.
+
+        `409` codes: `scan-not-completed`, `policy-version-unusable` (the stored
+        version no longer validates), `reevaluation-limit-reached`,
+        `evaluation-inputs-changed` (retry).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '../schemas/v1/reevaluation-request.schema.json'
+            example:
+              policyVersionId: 5b0c7f1e-2a3d-4c5b-8e9f-0a1b2c3d4e5f
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '201':
+          description: A new historical evaluation was recorded.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/scan-evaluation.schema.json'
+              example:
+                id: 2d4f6a8c-0e1b-4d3f-9a5c-7e9b1d3f5a7c
+                evaluationType: HISTORICAL
+                gating: false
+                scanId: 9a7e5c3b-1d2f-4a6b-8c0d-2e4f6a8b0c1d
+                projectId: 6d1f0a52-3c1e-4b8e-8f0e-1a2b3c4d5e6f
+                policyVersionId: 8e0a2c4e-6f1b-4d3a-8c5e-0b2d4f6a8c1e
+                policySha256: 3b5d7f9a1c2e4f6a8b0c2d4e6f8a0b1c3d5e7f9a1b3c5d7e9f0a2b4c6d8e0f1a
+                engineVersion: sentinelpipe-policy/1.0.0
+                decision: FAIL
+                violationCount: 1
+                incompleteCount: 0
+                reasons:
+                  - code: BLOCKING_FINDINGS_EXCEEDED
+                    effect: VIOLATION
+                    scanner: SEMGREP
+                    subject: null
+                    observed: 1
+                    limit: 0
+                evidence:
+                  - jobId: 3c5e7a9b-0d1f-4e2a-9b3c-5d7e9f1a3b5c
+                    scannerType: SEMGREP
+                    leaseEpoch: 1
+                    name: findings.json
+                    sha256: 2f1b8519c42b5085a2e3e6a4a70417fc2f1b8519c42b5085a2e3e6a4a70417fc
+                    resultSha256: 9f2b5c0d1e4a7b8c3d6e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c
+                evaluatedAt: '2026-10-11T12:04:30.25Z'
+                recordedAt: '2026-10-11T15:20:00.5Z'
+                initiatedBy: user:4a6c8e0b-2d4f-4b6a-8c0e-2f4a6c8e0b2d
+                inputsSha256: 7d9f1b3c5e7a9c1e3a5c7e9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f
+        '200':
+          description: The same re-evaluation was recorded before; nothing was written.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/scan-evaluation.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/scans/{scanId}/evaluations:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+    get:
+      tags: [Policies]
+      operationId: listScanEvaluations
+      summary: List a scan's evaluation history
+      description: |
+        The original (gating) evaluation, if any, and every historical
+        re-evaluation, oldest first. Records are returned as stored; nothing is
+        recalculated when read. Raw evidence and finding content are never
+        returned, only digests and structured reasons.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: A page of evaluation records.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/scan-evaluation-page.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/scans/{scanId}/evaluations/{evaluationId}:
+    parameters:
+      - $ref: '#/components/parameters/ScanId'
+      - name: evaluationId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Policies]
+      operationId: getScanEvaluationHistoryEntry
+      summary: Get one record of a scan's evaluation history
+      description: |
+        An original or historical evaluation of this scan. A record of another
+        scan is reported as not found.
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '200':
+          description: The evaluation record.
+          content:
+            application/json:
+              schema:
+                $ref: '../schemas/v1/scan-evaluation.schema.json'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/me:
     get:
       tags: [Identity]
@@ -904,6 +1072,13 @@ components:
       schema:
         type: string
         format: uuid
+    ScanId:
+      name: scanId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
     ProjectId:
       name: projectId
       in: path
@@ -938,6 +1113,11 @@ components:
       schema:
         type: string
         format: uri-reference
+    IdempotentReplayed:
+      description: '`true` when the response returns a previously recorded result and nothing was written.'
+      schema:
+        type: string
+        enum: ['true', 'false']
 
   responses:
     Unauthorized:

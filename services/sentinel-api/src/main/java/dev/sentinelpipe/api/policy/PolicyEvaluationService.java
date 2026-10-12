@@ -116,12 +116,21 @@ public class PolicyEvaluationService {
 					context.policyVersionId());
 			return incomplete(ReasonCode.POLICY_INVALID);
 		}
+		return evaluate(policy.definition(), context.scan(), jobs);
+	}
+
+	/**
+	 * Runs the engine on a validated policy. An unexpected engine error is INCOMPLETE
+	 * ({@link ReasonCode#EVALUATION_ERROR}): fail closed. Shared with historical
+	 * re-evaluation ({@link PolicyReevaluationService}), so both use one set of semantics.
+	 */
+	Evaluation evaluate(PolicyDefinition policy, ScanContext scan, List<JobEvidence> jobs) {
 		try {
-			return this.evaluator.evaluate(policy.definition(), context.scan(), jobs);
+			return this.evaluator.evaluate(policy, scan, jobs);
 		}
 		catch (RuntimeException ex) {
 			// Fail closed and record why; the exception never carries evidence content.
-			log.error("policy.evaluation_error scan_id={} error_type={}", context.scan().scanId(),
+			log.error("policy.evaluation_error scan_id={} error_type={}", scan.scanId(),
 					ex.getClass().getSimpleName());
 			return incomplete(ReasonCode.EVALUATION_ERROR);
 		}
@@ -131,7 +140,8 @@ public class PolicyEvaluationService {
 		return new Evaluation(PolicyDecision.INCOMPLETE, List.of(Reason.of(code, null)), List.of());
 	}
 
-	private List<JobEvidence> jobs(UUID scanId) {
+	/** Every job of the scan with its evidence of record, in the caller's transaction. */
+	List<JobEvidence> jobs(UUID scanId) {
 		Map<UUID, JobEvidence> jobs = new LinkedHashMap<>();
 		Map<UUID, List<Artifact>> artifacts = new LinkedHashMap<>();
 		this.jdbc.query("SELECT * FROM policy.job_evidence(?)", (rs) -> {

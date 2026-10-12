@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/scan-evaluation.schema.json",
+  "title": "Scan evaluation history entry",
+  "description": "An immutable policy evaluation of a scan (ADR-0013, ADR-0014). ORIGINAL is the pinned-policy evaluation recorded by the supervisor: the only gating record, the one behind the scan's decision. HISTORICAL is a later re-evaluation of the same evidence of record under an explicitly requested policy version: it never changes the scan's decision. `evaluatedAt` is the instant the evidence was judged as of (for a re-evaluation, the original decision time); `recordedAt` is when the record was written. Decision precedence and reason semantics are those of policy-evaluation.schema.json. PASS means the named policy's requirements were met by the evidence of record, including the limitations that policy explicitly accepts; it is not a statement that the project is secure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "evaluationType",
+    "gating",
+    "scanId",
+    "projectId",
+    "policyVersionId",
+    "policySha256",
+    "engineVersion",
+    "decision",
+    "violationCount",
+    "incompleteCount",
+    "reasons",
+    "evidence",
+    "evaluatedAt",
+    "recordedAt",
+    "initiatedBy",
+    "inputsSha256"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "evaluationType": {
+      "enum": [
+        "ORIGINAL",
+        "HISTORICAL"
+      ]
+    },
+    "gating": {
+      "description": "True only for the ORIGINAL evaluation.",
+      "type": "boolean"
+    },
+    "scanId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "projectId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "policyVersionId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "policySha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "engineVersion": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9./-]{0,39}$"
+    },
+    "decision": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "INCOMPLETE"
+      ]
+    },
+    "violationCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 512
+    },
+    "incompleteCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 512
+    },
+    "reasons": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "policy-evaluation.schema.json#/$defs/reason"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "$ref": "policy-evaluation.schema.json#/$defs/evidence"
+      }
+    },
+    "evaluatedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "recordedAt": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "initiatedBy": {
+      "description": "`supervisor` for the ORIGINAL evaluation; for a HISTORICAL one, the requester's internal identity reference (never a name, e-mail address or token subject).",
+      "type": "string",
+      "pattern": "^(supervisor|user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+    },
+    "inputsSha256": {
+      "description": "Fingerprint of the evidence of record and as-of instant a HISTORICAL record was computed from; null for the ORIGINAL evaluation.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "evaluationType": {
+            "const": "ORIGINAL"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "gating": {
+            "const": true
+          },
+          "initiatedBy": {
+            "const": "supervisor"
+          },
+          "inputsSha256": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "gating": {
+            "const": false
+          },
+          "initiatedBy": {
+            "pattern": "^user:"
+          },
+          "inputsSha256": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "violationCount": {
+            "const": 0
+          },
+          "incompleteCount": {
+            "const": 0
+          },
+          "reasons": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "FAIL"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "violationCount": {
+            "minimum": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "INCOMPLETE"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "violationCount": {
+            "const": 0
+          },
+          "incompleteCount": {
+            "minimum": 1
+          }
+        }
+      }
+    }
+  ]
+}

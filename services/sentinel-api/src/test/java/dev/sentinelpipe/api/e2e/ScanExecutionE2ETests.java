@@ -603,6 +603,87 @@ class ScanExecutionE2ETests extends AbstractDomainApiIntegrationTest {
 			.get("/api/v1/scans/{id}/evaluation", scans.get("clean"))).andReturn()).get("reasons")).isEmpty();
 	}
 
+	/**
+	 * M4 Phase 2 with real components (ADR-0014): the persisted evidence of a real Gitleaks
+	 * run, gated FAIL by its pinned policy, is re-evaluated through the API under a more
+	 * tolerant version and under the pinned version. The historical records are immutable
+	 * and non-gating: the scan keeps its decision, no scanner job is planned and no message
+	 * is published. Re-evaluation under the pinned version reproduces the original reasons.
+	 */
+	@Test
+	void realEvidenceIsReEvaluatedUnderAnotherPolicyWithoutChangingTheGatingDecision() throws Exception {
+		String repository = "reeval-leaky-" + UUID.randomUUID().toString().substring(0, 8);
+		Path root = Files.createDirectories(this.fixtures.resolve("acme").resolve(repository).resolve("src"));
+		Files.writeString(root.resolve("settings.py"), "TOKEN = \"" + syntheticToken('R') + "\"\n",
+				StandardCharsets.UTF_8);
+		UUID organizationId = createOrganization();
+		UUID projectId = createProject(organizationId, repository);
+		String strictId = json(postJson("/api/v1/organizations/" + organizationId + "/policies",
+				dev.sentinelpipe.api.policy.PolicyFixtures.gitleaksOnly("secrets")))
+			.get("id")
+			.asString();
+		this.mockMvc
+			.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+				.put("/api/v1/projects/{id}/policy", projectId)
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content("{\"policyVersionId\": \"%s\"}".formatted(strictId)))
+			.andExpect(status().isOk());
+		UUID scanId = UUID.fromString(json(requestScan(projectId, randomSha(), null)).get("id").asString());
+		this.lifecycle.planJob(scanId, ScannerType.GITLEAKS);
+		finish(startWorker(0, gitleaksWorker(), "--idle-timeout", "3"));
+		this.supervisor.runOnce();
+		assertThat(scan(scanId).get("securityDecision").asString()).isEqualTo("FAIL");
+		JsonNode original = json(this.mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+			.get("/api/v1/scans/{id}/evaluation", scanId)).andExpect(status().isOk()).andReturn());
+		long outbox = this.jdbcTemplate.queryForObject("SELECT count(*) FROM outbox_events", Long.class);
+		String tolerantId = json(postJson("/api/v1/organizations/" + organizationId + "/policies",
+				dev.sentinelpipe.api.policy.PolicyFixtures.gitleaksOnly("tolerant")
+					.replace("\"max_blocking_findings\": 0", "\"max_blocking_findings\": 100")))
+			.get("id")
+			.asString();
+
+		String body = "{\"policyVersionId\": \"%s\"}";
+		JsonNode tolerant = json(this.mockMvc
+			.perform(post("/api/v1/scans/{id}/reevaluations", scanId)
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content(body.formatted(tolerantId)))
+			.andExpect(status().isCreated())
+			.andReturn());
+		this.mockMvc
+			.perform(post("/api/v1/scans/{id}/reevaluations", scanId)
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content(body.formatted(tolerantId)))
+			.andExpect(status().isOk())
+			.andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+				.string("Idempotent-Replayed", "true"));
+		JsonNode pinned = json(this.mockMvc
+			.perform(post("/api/v1/scans/{id}/reevaluations", scanId)
+				.contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+				.content(body.formatted(strictId)))
+			.andExpect(status().isCreated())
+			.andReturn());
+
+		ContractSchemas.assertValid("scan-evaluation.schema.json", tolerant);
+		assertThat(tolerant.get("decision").asString()).isEqualTo("PASS");
+		assertThat(tolerant.get("gating").asBoolean()).isFalse();
+		assertThat(tolerant.get("evidence")).isEqualTo(original.get("evidence"));
+		assertThat(pinned.get("decision").asString()).isEqualTo("FAIL");
+		assertThat(pinned.get("reasons")).isEqualTo(original.get("reasons"));
+		// The gate is unchanged and nothing was dispatched.
+		assertThat(scan(scanId).get("securityDecision").asString()).isEqualTo("FAIL");
+		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM scan_jobs WHERE scan_id = ?", Long.class,
+				scanId))
+			.isEqualTo(1);
+		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM outbox_events", Long.class)).isEqualTo(outbox);
+		JsonNode history = json(this.mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+			.get("/api/v1/scans/{id}/evaluations", scanId)).andExpect(status().isOk()).andReturn());
+		ContractSchemas.assertValid("scan-evaluation-page.schema.json", history);
+		assertThat(history.at("/page/totalElements").asInt()).isEqualTo(3);
+		assertThat(history.at("/items/0/evaluationType").asString()).isEqualTo("ORIGINAL");
+		// Codes, counts and digests only: the synthetic secret is nowhere in the history.
+		assertThat(history.toString()).doesNotContain(syntheticToken('R'));
+	}
+
 	private static Path trivyLock() {
 		String lock = System.getProperty("sentinel.e2e.trivy-lock", "");
 		if (lock.isBlank() || lock.contains("${") || !Files.isRegularFile(Path.of(lock))) {

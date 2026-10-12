@@ -1,6 +1,6 @@
 # ADR-0013: Security policy engine
 
-- **Status:** Proposed (pending owner review)
+- **Status:** Accepted (2026-10-11; see [Acceptance](#acceptance)). Proposed until then.
 - **Date:** 2026-10-11
 - **Milestone:** M4 Phase 1 (first vertical slice)
 - **Builds on:** [ADR-0007](0007-database-authoritative-execution-leases.md) (lifecycle and
@@ -12,7 +12,8 @@
   owner approved this **direction** on 2026-10-11 as an intentional roadmap deviation (see
   [Roadmap deviation](#roadmap-deviation-an-in-process-engine-instead-of-oparego)). The ADR
   itself stays **Proposed** until the final security review and a successful remote CI run;
-  the approval of the direction is not an acceptance of this ADR.
+  the approval of the direction is not an acceptance of this ADR. The ADR was accepted on
+  2026-10-11 after remote CI #14 succeeded (see [Acceptance](#acceptance)).
 - **Specifications:** [policy.v1](../api/policy-contract-v1.md),
   [decision semantics](../architecture/policy-decision-semantics.md),
   [policy API](../api/policy-evaluation-api.md)
@@ -255,6 +256,47 @@ reproducible. It would be a new ADR.
 - Scans requested before a policy is activated, and scans whose evidence is older than the
   policy allows when the supervisor evaluates them, stay INCOMPLETE; there is no
   re-evaluation yet (Phase 2).
+
+## Acceptance
+
+- **Decision:** Accepted.
+- **Date:** 2026-10-11.
+- **Decision owner:** the repository owner (recorded on the owner's instruction; no
+  restriction is waived).
+- **Supporting CI:** GitHub Actions run #14 on `main`, commit `00d5e78`, all six jobs
+  green (5 min 4 s), as reported by the repository owner.
+- **Basis:** the [M4 Phase 1 security review](../security/m4-phase1-security-review.md)
+  (defects M4-1 to M4-7 fixed or corrected with regression tests; verdict: ready for commit
+  and remote CI) and that CI run.
+- **Accepted architectural deviation:** the deterministic in-process Java engine replaces
+  the roadmap's OPA/Rego for gate decisions, under the rationale, trade-offs and
+  reconsideration triggers recorded in
+  [Roadmap deviation](#roadmap-deviation-an-in-process-engine-instead-of-oparego).
+- **Residual risks accepted as documented** (security review R1 to R10, unchanged):
+  - R1: a compromised control plane can record a consistent but false evaluation;
+  - R2: the database owner or a superuser can rewrite policies, evidence, digests and
+    records consistently; there is no external anchor;
+  - R3: integrity, not authenticity: a compromised sandbox or worker can produce false
+    clean evidence for its own job;
+  - R4: PASS is relative to the policy's explicitly accepted limitations and to
+    non-comprehensive scanners; with local fixtures PASS requires accepting
+    `COMMIT_NOT_VERIFIED`;
+  - R5: a single gate evaluation per scan; evidence stale at evaluation is INCOMPLETE;
+  - R6: activation without a two-person rule; no security exceptions;
+  - R7: the architecture deviation above;
+  - R8: an evaluation record does not list the accepted limitations the evidence carried;
+  - R9: the invariant triggers exempt superusers, and the schema owner can disable triggers;
+  - R10: rows written before V009 are not re-validated by the invariant triggers.
+- **Non-production restrictions:** unchanged. Gitleaks, Semgrep and Trivy scan local
+  synthetic fixtures only and stay refused in production by worker and API; Trivy remains
+  disabled in production; Docker/runc is not a boundary for hostile repositories; the
+  domain API stays disabled by default and loopback-only. The engine therefore has no
+  production effect. There is no production authorization of any kind.
+- **Follow-up work for later milestones:** re-evaluation (M4 Phase 2,
+  [ADR-0014](0014-historical-policy-re-evaluation.md), proposed), security exceptions with
+  a two-person rule, finding comparison, remediation reports, a policy audit API, recording
+  accepted limitations in evaluation records (R8), and signed evidence or attestations with
+  an external append-only audit sink (M6/M7) to address R2 and R3.
 
 ## Remaining M4 roadmap (not implemented)
 

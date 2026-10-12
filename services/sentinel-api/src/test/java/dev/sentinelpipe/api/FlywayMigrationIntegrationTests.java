@@ -35,7 +35,8 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 					"V003__identity_and_memberships.sql", "V004__transactional_outbox.sql",
 					"V005__worker_receipts_and_operations.sql",
 					"V006__least_privilege_database_roles.sql", "V007__execution_leases_and_lifecycle.sql",
-					"V008__result_integrity_and_evidence.sql", "V009__security_policy_engine.sql");
+					"V008__result_integrity_and_evidence.sql", "V009__security_policy_engine.sql",
+					"V010__historical_policy_reevaluation.sql");
 		assertThat(history).allSatisfy((row) -> assertThat(row).containsEntry("success", true));
 		assertThat(flyway.info().pending()).isEmpty();
 	}
@@ -87,7 +88,7 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 				"lifecycle.settle_scan", "lifecycle.end_unfinished_jobs", "lifecycle.note_rejection",
 				"lifecycle.lease_rejection", "lifecycle.apply_job_outcome", "lifecycle.validate_job_result",
 				"policy.validate_reasons", "policy.refuse_change", "policy.require_initial_state",
-				"policy.require_evaluation_record");
+				"policy.require_evaluation_record", "policy.historical_inputs_sha256");
 
 		assertThat(functions).extracting((row) -> row.get("name"))
 			.containsExactlyInAnyOrder("worker.note_rejection", "worker.record_receipt", "ops.outbox_summary",
@@ -102,7 +103,10 @@ class FlywayMigrationIntegrationTests extends AbstractIntegrationTest {
 					"evidence.purge_expired", "policy.refuse_change", "policy.create_policy_version",
 					"policy.assign_project_policy", "policy.pin_scan_policy", "policy.evaluation_context",
 					"policy.job_evidence", "policy.validate_reasons", "policy.record_evaluation",
-					"policy.require_initial_state", "policy.require_evaluation_record");
+					"policy.require_initial_state", "policy.require_evaluation_record",
+					// V010: historical re-evaluation.
+					"policy.historical_inputs_sha256", "policy.historical_context",
+					"policy.record_historical_evaluation");
 		assertThat(functions).allSatisfy((row) -> {
 			assertThat(row).containsEntry("definer", !invokerHelpers.contains(row.get("name")))
 				.containsEntry("config", "search_path=pg_catalog, pg_temp")

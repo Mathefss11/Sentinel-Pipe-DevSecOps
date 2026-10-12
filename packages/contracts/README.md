@@ -28,6 +28,8 @@ Machine-readable contracts of the SentinelPipe control plane API.
 | `assign-project-policy-request.schema.json` | `PUT /api/v1/projects/{id}/policy` body |
 | `project-policy.schema.json` | Policy version in force for a project |
 | `policy-evaluation.schema.json` | `GET /api/v1/scans/{id}/evaluation` response: decision, structured reasons, evidence digests |
+| `reevaluation-request.schema.json` | `POST /api/v1/scans/{id}/reevaluations` body: the policy version only, never evidence (ADR-0014) |
+| `scan-evaluation.schema.json`, `scan-evaluation-page.schema.json` | Evaluation history entries (`ORIGINAL` gating record, `HISTORICAL` non-gating re-evaluations) and their page |
 | `problem-details.schema.json` | RFC 9457 error responses |
 | `common.schema.json` | Shared value types (`$defs`) |
 

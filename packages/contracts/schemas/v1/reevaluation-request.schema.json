@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/reevaluation-request.schema.json",
+  "title": "Request a historical policy re-evaluation",
+  "description": "Names the policy version to evaluate the scan's evidence of record against (ADR-0014). The version must belong to the scan's organization; a version of another organization is reported exactly like one that does not exist (404). Evidence, findings and decisions are never accepted from the caller: the evidence is the scan's persisted evidence of record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "policyVersionId"
+  ],
+  "properties": {
+    "policyVersionId": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    }
+  }
+}

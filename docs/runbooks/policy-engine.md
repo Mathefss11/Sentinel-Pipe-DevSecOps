@@ -1,4 +1,4 @@
-# Runbook: security policy engine (M4 Phase 1)
+# Runbook: security policy engine (M4 Phases 1 and 2)
 
 Operational notes for [ADR-0013](../adr/0013-security-policy-engine.md). Commands are
 PowerShell-compatible; SQL is run with a read-only or administrative session as noted.
@@ -31,8 +31,8 @@ activate it. There is no deactivation in Phase 1: activate another version inste
   `COMMIT_NOT_VERIFIED` and scanner-specific inherent limitations. A policy that does not
   accept them is never PASS. This is intended; do not "fix" it by accepting limitations
   without review.
-- **One evaluation per scan, no re-evaluation.** A scan evaluated INCOMPLETE stays
-  INCOMPLETE; request a new scan. In particular, if the supervisor was down longer than a
+- **One gate evaluation per scan.** A scan evaluated INCOMPLETE stays INCOMPLETE; request
+  a new scan. A historical re-evaluation (section 7) never changes the decision. In particular, if the supervisor was down longer than a
   policy's `max_age_seconds`, waiting scans are evaluated `EVIDENCE_STALE`.
 - **Scans requested before activation** are not pinned and stay
   `INCOMPLETE / POLICY_EVALUATION_UNAVAILABLE`.
@@ -96,3 +96,44 @@ Changing evaluation semantics requires a new `PolicyEvaluator.ENGINE_VERSION`, a
 update, and updated decision-matrix tests. Changing the policy.v1 vocabulary or canonical
 form is a contract change (see [policy contract](../api/policy-contract-v1.md#compatibility)):
 stored versions must keep validating, or they evaluate as `POLICY_INVALID` (fail closed).
+
+## 7. Historical re-evaluation
+
+[ADR-0014](../adr/0014-historical-policy-re-evaluation.md). An ADMIN or OWNER asks what a
+chosen policy version says about a **completed** scan's stored evidence:
+
+```text
+POST /api/v1/scans/{scan}/reevaluations   {"policyVersionId": "<uuid>"}
+GET  /api/v1/scans/{scan}/evaluations     (history: ORIGINAL first, then HISTORICAL)
+```
+
+- The result is `HISTORICAL`, `gating: false`. It never changes the scan's decision. Do
+  not report a historical PASS as approval; the gate decision is the scan's
+  `securityDecision` and its `ORIGINAL` record.
+- Evidence age is measured as of the original decision time, so old scans are not
+  reported stale merely because time passed.
+- Repeating the same request returns the existing record (`Idempotent-Replayed: true`).
+  A new record appears only if the policy version, the engine version or the stored
+  evidence changed (for example content purged by retention: `EVIDENCE_PURGED`).
+- `409` codes: `scan-not-completed`, `policy-version-unusable`,
+  `reevaluation-limit-reached` (100 per scan), `evaluation-inputs-changed` (retry).
+- A `500` with a log line containing `evaluation rejected: <CODE>` (other than
+  `INPUTS_CHANGED`) means the database refused a record the engine produced: treat it as a
+  defect or tampering signal, as in section 4. `NONDETERMINISTIC` means the engine now
+  gives a different answer for an identity it already recorded: check whether decision
+  semantics changed without a new `ENGINE_VERSION`.
+
+Integrity checks (administrative session):
+
+```sql
+-- Every historical reason list matches its digest (also enforced by a CHECK).
+SELECT count(*) FROM policy.historical_evaluations
+WHERE reasons_sha256 <> encode(sha256(convert_to(reasons, 'UTF8')), 'hex');
+
+-- Every historical record names its policy version's digest (also a foreign key).
+SELECT count(*) FROM policy.historical_evaluations h
+JOIN policy.policy_versions v ON v.id = h.policy_version_id
+WHERE v.definition_sha256 <> h.policy_sha256;
+```
+
+Both counts must be `0`; the triggers listed in section 5 include the two new tables.

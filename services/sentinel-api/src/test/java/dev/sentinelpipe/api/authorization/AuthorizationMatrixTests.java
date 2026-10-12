@@ -31,6 +31,8 @@ class AuthorizationMatrixTests {
 				Map.entry(OrganizationPermission.MANAGE_MEMBERS, EnumSet.of(OWNER, ADMIN)),
 				// M4: drafting a policy version and putting it in force are separate duties.
 				Map.entry(OrganizationPermission.MANAGE_POLICIES, EnumSet.of(OWNER, ADMIN)),
+				// M4 Phase 2: historical re-evaluation is non-gating (ADR-0014).
+				Map.entry(OrganizationPermission.REEVALUATE_SCANS, EnumSet.of(OWNER, ADMIN)),
 				Map.entry(OrganizationPermission.ACTIVATE_POLICY, EnumSet.of(OWNER)));
 
 		assertThat(expected.keySet()).containsExactlyInAnyOrder(OrganizationPermission.values());

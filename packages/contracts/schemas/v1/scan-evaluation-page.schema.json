@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sentinelpipe.dev/schemas/v1/scan-evaluation-page.schema.json",
+  "title": "ScanEvaluationPage",
+  "description": "A page of a scan's evaluation history, oldest first: by recording time, the ORIGINAL evaluation before a HISTORICAL one recorded at the same instant, then by id. Records are returned as stored; nothing is recalculated when read.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items", "page"],
+  "properties": {
+    "items": { "type": "array", "maxItems": 100, "items": { "$ref": "scan-evaluation.schema.json" } },
+    "page": { "$ref": "page-metadata.schema.json" }
+  }
+}

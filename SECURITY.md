@@ -196,5 +196,7 @@ The current version implements the following controls:
 - GitHub webhook and OIDC validation are not implemented yet. Real scanners run on local
   synthetic repositories only. Policy decisions (ADR-0013) trust the database owner and the
   control-plane process; evidence integrity is verified, evidence authenticity is not.
+  Historical re-evaluations (ADR-0014) are non-gating records with the same trust
+  limits; a historical PASS is never an approval.
 - Image digests and action SHAs are pinned but not yet updated automatically. Dependency
   update automation and provenance verification are planned for later milestones.

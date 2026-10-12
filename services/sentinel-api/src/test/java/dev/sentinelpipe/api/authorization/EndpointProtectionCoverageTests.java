@@ -49,7 +49,7 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 				PolicyFixtures.gitleaksOnly("covered"))).get("id").asString());
 		this.pathVariables = Map.of("organizationId", organizationId.toString(), "projectId", projectId.toString(),
 				"scanId", scanId.toString(), "membershipId", membershipId.toString(), "policyVersionId",
-				policyVersionId.toString());
+				policyVersionId.toString(), "evaluationId", UUID.randomUUID().toString());
 		this.foreignPolicyVersionId = policyVersionId;
 	}
 
@@ -89,6 +89,9 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 	private String bodyFor(String method, String path) {
 		if (method.equals("POST") && path.endsWith("/policies")) {
 			return PolicyFixtures.gitleaksOnly("intruder");
+		}
+		if (method.equals("POST") && path.endsWith("/reevaluations")) {
+			return "{\"policyVersionId\": \"%s\"}".formatted(this.foreignPolicyVersionId);
 		}
 		if (method.equals("PUT") && path.endsWith("/policy")) {
 			return "{\"policyVersionId\": \"%s\"}".formatted(this.foreignPolicyVersionId);
@@ -151,6 +154,10 @@ class EndpointProtectionCoverageTests extends AbstractDomainApiIntegrationTest {
 			.isZero();
 		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM policy.project_assignments WHERE project_id = ?",
 				Integer.class, UUID.fromString(this.pathVariables.get("projectId"))))
+			.isZero();
+		// No historical re-evaluation was recorded for the outsider.
+		assertThat(this.jdbcTemplate.queryForObject("SELECT count(*) FROM policy.historical_evaluations WHERE scan_id = ?",
+				Integer.class, UUID.fromString(this.pathVariables.get("scanId"))))
 			.isZero();
 	}
 
