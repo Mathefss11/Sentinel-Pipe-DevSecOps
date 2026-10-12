@@ -27,6 +27,7 @@ from infrastructure import (
     drain,
     publish,
     queue_depth,
+    wait_for_depth,
 )
 from prometheus_client import generate_latest
 
@@ -663,7 +664,8 @@ def test_replay_without_a_committed_audit_record_does_not_move_the_message(
     broker: Broker,
 ) -> None:
     forged = scan_requested()
-    _dead_letter(broker, json.dumps(forged).encode(), forged, "UNKNOWN_EVENT")
+    body = json.dumps(forged).encode()
+    _dead_letter(broker, body, forged, "UNKNOWN_EVENT")
 
     def failing_audit(*_: Any) -> str:
         raise psycopg.OperationalError("database unavailable")
@@ -676,8 +678,17 @@ def test_replay_without_a_committed_audit_record_does_not_move_the_message(
 
     assert report.replayed == 0
     assert report.stopped_reason == "audit_failed"
-    assert queue_depth(broker, DEAD_LETTER_QUEUE) == 1
+    assert report.items == []
+    # The requeue (nack or channel close) is applied asynchronously by the quorum queue.
+    wait_for_depth(broker, DEAD_LETTER_QUEUE, 1)
     assert queue_depth(broker, WORKER_QUEUE) == 0
+    # The dead-letter copy is returned unchanged: same body and failure metadata, and no
+    # replay audit header (nothing was audited, so nothing may be marked as replayed).
+    (properties, requeued), *rest = drain(broker, DEAD_LETTER_QUEUE)
+    assert rest == []
+    assert requeued == body
+    assert json.loads(properties.headers[DEAD_LETTER_HEADER])["failure_code"] == "UNKNOWN_EVENT"
+    assert operations.REPLAY_AUDIT_HEADER not in properties.headers
 
 
 @pytest.mark.usefixtures("empty_queues")
@@ -696,7 +707,7 @@ def test_the_dead_letter_queue_never_drops_messages_after_many_redeliveries(
         assert method is not None, "dead-lettered message was discarded"
         channel.basic_nack(method.delivery_tag, requeue=True)
     connection.close()
-    assert queue_depth(broker, DEAD_LETTER_QUEUE) == 1
+    wait_for_depth(broker, DEAD_LETTER_QUEUE, 1)
 
 
 # ---------------------------------------------------------------------------

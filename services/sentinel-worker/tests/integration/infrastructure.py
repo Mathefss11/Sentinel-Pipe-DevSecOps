@@ -20,6 +20,7 @@ import io
 import json
 import secrets
 import tarfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -192,6 +193,19 @@ def queue_depth(broker: Broker, queue: str) -> int:
     depth = connection.channel().queue_declare(queue, passive=True).method.message_count
     connection.close()
     return int(depth)
+
+
+def wait_for_depth(broker: Broker, queue: str, expected: int, timeout: float = 15.0) -> None:
+    """Polls until ``queue`` has ``expected`` ready messages.
+
+    Broker-side changes such as a requeue after ``basic_nack`` or a channel close, expiry
+    or delivery-limit dead-lettering are applied asynchronously (through Raft for quorum
+    queues), so a depth read from another connection right after them can be stale.
+    """
+    deadline = time.monotonic() + timeout
+    while queue_depth(broker, queue) != expected:
+        assert time.monotonic() < deadline, f"{queue} did not reach depth {expected}"
+        time.sleep(0.2)
 
 
 def drain(broker: Broker, queue: str) -> list[tuple[pika.BasicProperties, bytes]]:

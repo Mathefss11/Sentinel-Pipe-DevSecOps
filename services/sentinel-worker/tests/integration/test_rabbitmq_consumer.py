@@ -10,7 +10,6 @@ and multi-worker behaviour with PostgreSQL is covered in test_distributed_proces
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +23,7 @@ from infrastructure import (
     drain,
     publish,
     queue_depth,
+    wait_for_depth,
 )
 
 from sentinel_worker.messaging import contracts
@@ -284,13 +284,6 @@ def failing_consumer(broker: Broker, tmp_path: Path) -> ScanRequestConsumer:
         "sentinel-worker-it",
         sleep=lambda _: None,
     )
-
-
-def wait_for_depth(broker: Broker, queue: str, expected: int, timeout: float = 15.0) -> None:
-    deadline = time.monotonic() + timeout
-    while queue_depth(broker, queue) != expected:
-        assert time.monotonic() < deadline, f"{queue} did not reach depth {expected}"
-        time.sleep(0.2)
 
 
 def test_transient_failure_moves_the_message_to_the_retry_queue(
