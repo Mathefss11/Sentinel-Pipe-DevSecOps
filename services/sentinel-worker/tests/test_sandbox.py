@@ -610,3 +610,81 @@ def test_runtime_cli_output_without_a_real_container_is_never_success() -> None:
 
     assert run_result.status is SandboxStatus.START_FAILED
     assert outcome_for(run_result).failure_reason is FailureReason.SANDBOX_ERROR
+
+
+class LateOomCli(DockerCli):
+    """A runtime CLI whose container exits with ``exit_code``; ``inspect`` returns the
+    scripted states in order (the last one repeats), like a daemon that records the OOM
+    kill only after it has handled the exit."""
+
+    def __init__(self, exit_code: int, oom_flags: list[bool]) -> None:
+        self.exit_code = exit_code
+        self.oom_flags = oom_flags
+        self.calls: list[str] = []
+
+    def start(self, arguments: Any, stdin: bool = False) -> Any:
+        import subprocess
+
+        return subprocess.Popen(  # noqa: S603 - test double
+            [sys.executable, "-c", f"raise SystemExit({self.exit_code})"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def call(self, arguments: Any, timeout: float = 30) -> Any:
+        import subprocess
+
+        self.calls.append(arguments[0])
+        if arguments[0] == "inspect":
+            oom = self.oom_flags[min(self.calls.count("inspect"), len(self.oom_flags)) - 1]
+            state = STARTED | {"Running": False, "ExitCode": self.exit_code, "OOMKilled": oom}
+            return subprocess.CompletedProcess(arguments, 0, json.dumps(state).encode(), b"")
+        if arguments[0] == "rm":
+            return subprocess.CompletedProcess(arguments, 0, b"", b"")
+        return subprocess.CompletedProcess(arguments, 1, b"", b"")
+
+
+def late_oom_sandbox(cli: LateOomCli, sleeps: list[float]) -> DockerSandbox:
+    return DockerSandbox(cli, SandboxPolicy(), monitor_interval=60, sleep=sleeps.append)
+
+
+def test_an_oom_kill_recorded_after_the_exit_is_still_a_resource_limit() -> None:
+    # CI #17: the fixture's process was OOM-killed and its shell then exited 1, but the
+    # first inspect did not show OOMKilled yet, so the run was retried as SCANNER_ERROR.
+    cli = LateOomCli(1, [False, False, True])
+    sleeps: list[float] = []
+
+    run_result = late_oom_sandbox(cli, sleeps).run(ARGV, threading.Event())
+
+    assert run_result.status is SandboxStatus.OOM_KILLED
+    assert run_result.exit_code == 1
+    assert outcome_for(run_result).failure_reason is FailureReason.RESOURCE_LIMIT_EXCEEDED
+    assert cli.calls.count("inspect") == 3
+    # The container is inspected before it is removed, and still removed.
+    assert cli.calls[-1] == "rm"
+    assert run_result.removed
+
+
+def test_a_scanner_error_without_an_oom_kill_waits_a_bounded_time() -> None:
+    cli = LateOomCli(1, [False])
+    sleeps: list[float] = []
+
+    run_result = late_oom_sandbox(cli, sleeps).run(ARGV, threading.Event())
+
+    assert run_result.status is SandboxStatus.EXITED
+    assert outcome_for(run_result).failure_reason is FailureReason.SCANNER_ERROR
+    assert cli.calls.count("inspect") == 21
+    assert sum(sleeps) == pytest.approx(2.0)
+    assert cli.calls[-1] == "rm"
+
+
+def test_a_successful_exit_is_not_re_inspected() -> None:
+    cli = LateOomCli(0, [False, True])
+    sleeps: list[float] = []
+
+    run_result = late_oom_sandbox(cli, sleeps).run(ARGV, threading.Event())
+
+    assert run_result.status is SandboxStatus.EXITED
+    assert run_result.exit_code == 0
+    assert cli.calls.count("inspect") == 1
+    assert sleeps == []

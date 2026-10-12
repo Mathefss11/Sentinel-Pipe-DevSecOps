@@ -50,6 +50,12 @@ logger = logging.getLogger(__name__)
 
 _CHUNK = 64 * 1024
 _CLI_TIMEOUT = 30.0
+#: Docker sets ``State.OOMKilled`` when it handles the runtime's OOM event, which is
+#: delivered separately from the exit event: an inspect right after the process exited can
+#: still show ``false``. A natural nonzero exit is therefore re-inspected, at most this many
+#: times this far apart (about 2 s in total), before it is classified as a plain exit.
+_OOM_REPORT_ATTEMPTS = 20
+_OOM_REPORT_INTERVAL = 0.1
 _SECRET_LIKE = re.compile(r"[A-Za-z0-9+/=_\-]{20,}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
 _SIZE = re.compile(r"([0-9.]+)\s*([KMGT]?i?B)", re.IGNORECASE)
@@ -252,12 +258,14 @@ class DockerSandbox:
         monitor_interval: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._docker = docker
         self.policy = policy
         self._monitor_interval = monitor_interval
         self._clock = clock
         self._wall_clock = wall_clock
+        self._sleep = sleep
 
     def run(
         self,
@@ -328,6 +336,8 @@ class DockerSandbox:
             stderr.join(timeout=10)
             monitor.stop()
             state = self._inspect(name)
+            if reason is None:
+                state = self._await_oom_report(name, state)
         finally:
             # Also on unexpected errors: no monitor thread or container may outlive the run.
             monitor.stop()
@@ -404,6 +414,26 @@ class DockerSandbox:
             process.wait(timeout=15)
         if process.poll() is None:
             process.kill()
+
+    def _await_oom_report(self, name: str, state: dict[str, Any] | None) -> dict[str, Any] | None:
+        """The container state once a pending OOM report is recorded (see
+        ``_OOM_REPORT_ATTEMPTS``). Only a natural, nonzero exit without the OOM flag is
+        re-inspected; the result can only change that failure into ``OOM_KILLED``."""
+        if (
+            state is None
+            or state.get("Running")
+            or state.get("OOMKilled")
+            or state.get("ExitCode") in (0, None)
+        ):
+            return state
+        for _ in range(_OOM_REPORT_ATTEMPTS):
+            self._sleep(_OOM_REPORT_INTERVAL)
+            later = self._inspect(name)
+            if later is None:
+                break
+            if later.get("OOMKilled"):
+                return later
+        return state
 
     def _inspect(self, name: str) -> dict[str, Any] | None:
         try:
